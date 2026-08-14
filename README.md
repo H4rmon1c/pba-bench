@@ -45,8 +45,8 @@ cores), regtest:
 
 | Case | Poison inputs (N) | CHECKSIG/input (K) | BIP-54 sigops | Sighash preimage | Wall | CPU | Outcome |
 |---|---|---|---|---|---|---|---|
-| `small` | 500 | 6 | 3,000 | 0.01 GB | 0.1 s | 0.4 s | accepted |
-| demo | 3,000 | 100 | 300,000 | 0.38 GB | 2.3 s | 33.6 s | accepted |
+| `small` | 500 | 6 | 3,000 | 0.01 GB | 0.036 s | 0.44 s | accepted |
+| demo | 3,000 | 100 | 300,000 | 0.38 GB | 2.2 s | 32.5 s | accepted |
 | **demo, `-par=1`** | **8,500** | **100** | **850,000** | **2.99 GB** | **85.1 s** | **85.1 s** | **accepted** |
 
 The `-par=1` case runs a single script-validation thread, which is what a weak or
