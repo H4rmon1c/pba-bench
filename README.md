@@ -156,6 +156,10 @@ python3 -m venv .venv
 
 # generate a markdown report from a results dir
 .venv/bin/python ./pba_bench.py report results/demo-8500x100-par1/results.json
+
+# one-command reproduction of the headline result (single-threaded AND parallel),
+# saved under results/reproduce-<timestamp>/ with a printed summary
+./scripts/reproduce.sh            # or: ./scripts/reproduce.sh /path/to/bitcoind
 ```
 
 Cross-version comparison: pass a different `--bitcoind` binary (Core 29/30/31, Knots, a
