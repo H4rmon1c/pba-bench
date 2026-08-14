@@ -1,0 +1,718 @@
+
+### [MD 0]
+# Block propagation and validation duration during slow-to-validate blocks on Signet
+
+I used this notebook on colab.research.google.com to generate the figures and data for https://bnoc.xyz/t/block-propagation-and-validation-duration-during-slow-to-validate-blocks-on-signet/117.
+
+As long as the data from https://tmp.b10c.me/2026-04-slow-blocks-signet/data/ is still up (it's "tmp"!), you should be able to generate the same plots as I did from the data (or possibly extend this research).
+
+### [CODE 1]
+!pip install mermaid-py
+
+### [CODE 2]
+import pandas as pd
+from datetime import datetime
+import seaborn as sns
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from matplotlib.lines import Line2D
+import matplotlib.patches as mpatches
+
+sns.set_theme(style="whitegrid")
+
+### [CODE 3]
+!wget -q https://tmp.b10c.me/2026-04-slow-blocks-signet/data/block_announcements_1775638901-run1.csv -O block_announcements_1775638901-run1.csv
+!wget -q https://tmp.b10c.me/2026-04-slow-blocks-signet/data/block_announcements_1775665049-run2.csv -O block_announcements_1775665049-run2.csv
+!wget -q https://tmp.b10c.me/2026-04-slow-blocks-signet/data/block_announcements_1775688794-run3.csv -O block_announcements_1775688794-run3.csv
+
+### [CODE 4]
+run1_hashes = [
+    "0000000eb552c9f26e712d546c71297fd0623890299b40e7ada81d2dc32f5d0b",
+    "000000002b3a132836666c18f5e1a9d93623d3797316a968ee54e47fb44c0c13",
+    "00000006d34037534a517f9e5809a34766f1540c0e6817eac91b1adfee50cb5f",
+    "00000014a4cae4501f98539b45c76059c706a82b77f19a9adf365b3f5e989444",
+    "00000003220437cb8b5a2edef6be828c5cdad114b1b642d724ac6f3caa7f12fb",
+    "000000143c97bf0134c5cf0881dfd4ef458529b7388cacf43981ffe92fb96856",
+]
+
+run2_hashes = [
+    "00000011ee1088ab58ade91da86761478799b685699b30bc649c83f13725bc6d",
+    "000000037a35ebf60c59619042ece8ae71fecf4d3146098c966f820482d33955",
+    "0000001253d4dbf6b7b34079a70ef0357a7b12e83a38f29946effbc863f194f3",
+    "0000000b4f9d1ba885832b1b9dd4f6183483a27a4762a48114c00a812f1b42dd",
+    "00000011240c362604a624fc4469413f36ff5cb823c0733d570d54c7916a913f",
+    "000000065d332b249b5fc8068177776b3dddb073d308ae5b090147c41477e351"
+]
+
+run3_hashes = [
+    "0000000db638fd84f3668c983cdf3f305a098c61d0bcbc657a15250b081efdd4",
+    "00000013079c637e2d4b37cb95f019479a4e86a041e9eee162c6e2ae1758ed9d",
+    "0000000685879728d212116865fcf49d3b108588420f737edee8c331434bd407",
+    "00000004af57cad1f5cd0563db9b4fd7dc29f4de92b48aecba7ff7e29d68e1c0",
+    "0000000a0ee0a258ea2fbb2d2b0d465374885b2483ae4d175cc44aa843c63147",
+    "0000001018d0038f11974c98548fca64686380c21052a856cb8c4790cf6e50ce",
+]
+
+def get_run(hash):
+  if hash in run1_hashes:
+    return "run 1"
+  elif hash in run2_hashes:
+    return "run 2"
+  elif hash in run3_hashes:
+    return "run 3"
+  else:
+    return "none"
+
+### [CODE 5]
+mapAnnType = {
+  0: "Unknown",
+  1: "Inv",
+  2: "Headers",
+  3: "Compact Block",
+  4: "GetBlockTxn",
+  5: "BlockTxn"
+}
+
+### [CODE 6]
+def time_formatter(x, pos):
+    is_neg = x < 0
+    abs_x = abs(x)
+    if abs_x >= 60000:
+        mins, secs = int(abs_x // 60000), int((abs_x % 60000) // 1000)
+        res = f'{mins}m' + (f' {secs}s' if secs > 0 else '')
+    elif abs_x >= 1000:
+        res = f'{abs_x/1000:g}s'
+    else:
+        res = f'{abs_x:g}ms'
+    return f'-{res}' if is_neg and abs_x != 0 else res
+
+def duration_formatter(d_ms):
+  if d_ms < 1000:
+    return f"{d_ms:.0f}ms"
+  return f"{d_ms / 1000:.1f}s"
+
+### [CODE 7]
+import glob
+
+# Get a list of all block_announcements files
+file_pattern = '/content/block_announcements*.csv'
+file_list = glob.glob(file_pattern)
+
+# Sort files for sequential processing if needed, though glob usually returns sorted paths
+file_list.sort()
+
+print("Processing block announcement files:")
+for filepath in file_list:
+    try:
+        df_temp = pd.read_csv(filepath)
+        # Convert timestamp_ms to datetime for human-readable format
+        df_temp['datetime'] = pd.to_datetime(df_temp['timestamp_ms'], unit='ms')
+
+        min_timestamp = df_temp['datetime'].min()
+        max_timestamp = df_temp['datetime'].max()
+
+        print(f"File: {filepath.split('/')[-1]}")
+        print(f"  Min Timestamp: {min_timestamp}")
+        print(f"  Max Timestamp: {max_timestamp}")
+        print("---")
+
+    except Exception as e:
+        print(f"Error processing {filepath}: {e}")
+
+### [MD 8]
+
+
+### [CODE 9]
+from mermaid import Mermaid
+Mermaid("""
+%%{init: {'theme': 'dark', 'sequence': {'mirrorActors': false, 'actorMargin': 2}, 'themeVariables': {
+    'actorBkg': '#0000',
+    'actorBorder': '#0000',
+    'actorTextColor': '#ffffff',
+    'actorFontWeight': 'bold'
+}}}%%
+sequenceDiagram
+    miner->>peer: cmpctblock (HB)
+    peer->>miner: getblocktxn
+    miner->>peer: blocktxn
+    activate peer
+    Note over peer: reconstructing block
+    peer->>observer:  [t0]               cmpctblock                 [t1]
+    deactivate peer
+    activate peer
+    observer->>peer: [t3]                     getblocktxn             [t2]
+    Note over peer: validating block [d]
+    peer->>observer: [t4]                    blocktxn                    [t5]
+    deactivate peer
+""")
+
+### [MD 10]
+Timings:
+
+- t0: peer finishes reconstruction, sends announcement of high-bandwidth cmpctblock to us
+- t1: we receive announcement of cmpctblock (~0.5 RTT after t0)
+- t2: we send getblocktxn request (assumed to be instant)
+- t3: peer receives getblocktxn request (~0.5 RTT after t2)
+- t4: peer finishes validation and sends blocktxn (variable)
+- t5: we receive blocktxn (~0.5 RTT after t4)
+
+We want to measure the time between t0 and t4 (d). We have t1 (and t2) and t5 and the RTT between us and the peer. However, since we have to do one full round-trip between t0 and t4, when the block validates faster than our RTT to the peer, we can only get an upper-bound on validation time. In this case, d ≈ RTT.
+
+```
+t0 = t1 - (0.5 RTT)
+t2 = t1
+t3 = t1 + (0.5 RTT)
+t4 = t5 - (0.5 RTT)
+
+d = t4 - t0
+longer_than_rtt = d > RTT
+```
+
+
+
+### [CODE 11]
+def calc_timings(t1, t5, rtt):
+    t0 = t1 - (rtt / 2)
+    t3 = t1 + (rtt / 2)
+    t4 = t5 - (rtt / 2)
+
+    d = t4 - t0
+    longer_than_rtt = d > rtt
+
+    return t0, t3, t4, d, longer_than_rtt
+
+### [MD 12]
+# Combine CSVs
+
+### [CODE 13]
+# create a df_master from all three runs
+
+df_run1 = pd.read_csv('/content/block_announcements_1775638901-run1.csv')
+df_run1["announcement"] = df_run1.announcement_type.apply(lambda x: mapAnnType[x])
+df_run1["run"] = df_run1.block_hash.apply(get_run)
+
+df_run2 = pd.read_csv('/content/block_announcements_1775665049-run2.csv')
+df_run2["announcement"] = df_run2.announcement_type.apply(lambda x: mapAnnType[x])
+df_run2["run"] = df_run2.block_hash.apply(get_run)
+
+df_run3 = pd.read_csv('/content/block_announcements_1775688794-run3.csv')
+df_run3["announcement"] = df_run3.announcement_type.apply(lambda x: mapAnnType[x])
+df_run3["run"] = df_run3.block_hash.apply(get_run)
+
+# Prefix connection_ids with the run number to ensure uniqueness
+df_run1_copy = df_run1.copy()
+df_run1_copy['connection_id'] = '1-' + df_run1_copy['connection_id'].astype(str)
+
+df_run2_copy = df_run2.copy()
+df_run2_copy['connection_id'] = '2-' + df_run2_copy['connection_id'].astype(str)
+
+df_run3_copy = df_run3.copy()
+df_run3_copy['connection_id'] = '3-' + df_run3_copy['connection_id'].astype(str)
+
+# Combine the three runs into one master DataFrame
+df_master = pd.concat([df_run1_copy, df_run2_copy, df_run3_copy], ignore_index=True)
+
+df_master["network"] = df_master.peer_addr.apply(lambda x: "onion" if ".onion" in x else "ipv4")
+
+print(f"df_master with {len(df_master)} rows")
+display(df_master.head())
+
+### [MD 14]
+# Propagation duration
+
+
+### [CODE 15]
+median_rtts = df_master.groupby('peer_addr')['rtt_ms'].median().to_dict()
+
+plt.figure(figsize=(14, 7))
+
+# Filter for types 1 (Inv) and 3 (Compact Block)
+df_filtered = df_master[df_master['announcement_type'].isin([1, 3])].copy()
+
+# Estimate t0 (peer arrival time)
+df_filtered['adjusted_ts'] = df_filtered.apply(
+    lambda x: x['timestamp_ms'] - (median_rtts.get(x['peer_addr'], 0) / 2),
+    axis=1
+)
+
+df_filtered["validation-speed"] = df_filtered.run.apply(lambda x: "normal" if x == "none" else "slow")
+
+# Find the global first arrival per block hash
+first_arrivals = df_filtered.groupby('block_hash')['adjusted_ts'].min().to_dict()
+df_filtered['delta_ms'] = df_filtered.apply(
+    lambda x: x['adjusted_ts'] - first_arrivals[x['block_hash']],
+    axis=1
+)
+
+color_logic = {
+    ('normal', 1): '#2196F3',      # blue — Normal Inv
+    ('normal', 3): '#4CAF50',      # green — Normal Cmpct
+    ('slow', 1): '#F44336',     # red — Slow Inv
+    ('slow', 3): '#FF9800',     # orange — Slow Cmpct
+}
+
+legend_elements = [
+    Line2D([0], [0], color='#4CAF50', label='normal - hb cmpctblock'),
+    Line2D([0], [0], color='#2196F3', label='normal - inv'),
+    Line2D([0], [0], color='#FF9800', label='slow - hb cmpctblock'),
+    Line2D([0], [0], color='#F44336', label='slow - inv'),
+]
+
+# Plot each block hash individually IF it has > 10 announcements
+unique_hashes = df_filtered['block_hash'].unique()
+for b_hash in unique_hashes:
+    block_subset = df_filtered[df_filtered['block_hash'] == b_hash]
+
+    # Skip blocks with 10 or fewer announcements
+    if len(block_subset) <= 10:
+        continue
+
+    speed = block_subset['validation-speed'].iloc[0]
+
+    # Type 1 (Inv)
+    subset1 = block_subset[block_subset['announcement_type'] == 1]
+    if not subset1.empty:
+        ax = sns.ecdfplot(data=subset1, x='delta_ms', color=color_logic[(speed, 1)], alpha=0.4)
+
+    # Type 3 (Compact Block)
+    subset3 = block_subset[block_subset['announcement_type'] == 3]
+    if not subset3.empty:
+        ax = sns.ecdfplot(data=subset3, x='delta_ms', color=color_logic[(speed, 3)], alpha=0.4)
+
+plt.xscale('symlog', linthresh=100)
+plt.gca().xaxis.set_major_formatter(mticker.ScalarFormatter())
+plt.gca().yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+plt.gca().yaxis.set_major_locator(mticker.MultipleLocator(0.10))
+
+plt.legend(handles=legend_elements, loc='upper left', title="validation-speed &\n annoucement type")
+
+plt.xscale('symlog', linthresh=10)
+plt.gca().xaxis.set_major_formatter(mticker.FuncFormatter(time_formatter))
+plt.xticks([ 0, 10, 100, 500, 1000, 3000, 5_000, 10_000, 20000, 60000, 180_000, 300_000, 600_000, 20 * 60 * 1000])
+
+
+for i, (speed, label, color) in enumerate([("normal", 1, '#2196F3'), ("normal", 3, '#4CAF50'), ("slow", 1, '#F44336'), ("slow", 3, '#FF9800'),]):
+    subset = df_filtered[(df_filtered['announcement_type'] == label) & (df_filtered['validation-speed'] == speed)]['delta_ms']
+    values = np.percentile(subset, [25, 50, 75, 90])
+    for p, v in zip([25, 50, 75, 90], values):
+        ax.axvline(x=v, ymax=0.01*p, color="black", linestyle='--', alpha=0.5)
+        ax.annotate(f'p{p}: {duration_formatter(v)}', xy=(v, 0.01*(p + (3 if i % 2 == 0 else -3))),
+                    color=color, fontsize=12, ha='center', va='bottom',
+                    xytext=(5, 0), textcoords='offset points',
+                    bbox=dict(facecolor='white', alpha=0.9, edgecolor='gray', pad=2))
+
+
+plt.title('ECDF of block propagation with INV and CMPCTBLOCK during normal and slow-to-validate blocks')
+plt.xlabel('Duration since first annoucement (RTT ajusted)')
+plt.ylabel('Proportion of peers that annouced the block')
+plt.grid(True, which='both', linestyle='--', alpha=0.5)
+plt.xlim(0, 20 * 60 * 1000)
+plt.show()
+
+### [CODE 16]
+median_rtts = df_master.groupby('peer_addr')['rtt_ms'].median().to_dict()
+
+plt.figure(figsize=(12, 6))
+
+# Filter for types 1 (Inv) and 3 (Compact Block)
+
+
+df_filtered = df_master[df_master['announcement_type'].isin([1, 3])].copy()
+
+# Estimate t0 (peer arrival time)
+df_filtered['adjusted_ts'] = df_filtered.apply(
+    lambda x: x['timestamp_ms'] - (median_rtts.get(x['peer_addr'], 0) / 2),
+    axis=1
+)
+
+df_filtered["validation-speed"] = df_filtered.run.apply(lambda x: "normal" if x == "none" else "slow")
+
+# Find the global first arrival per block hash
+first_arrivals = df_filtered.groupby('block_hash')['adjusted_ts'].min().to_dict()
+df_filtered['delta_ms'] = df_filtered.apply(
+    lambda x: x['adjusted_ts'] - first_arrivals[x['block_hash']],
+    axis=1
+)
+
+color_logic = {
+    ('slow', 1): '#F44336',     # red — Slow Inv
+    ('slow', 3): '#FF9800',     # orange — Slow Cmpct
+}
+
+from matplotlib.lines import Line2D
+legend_elements = [
+    Line2D([0], [0], color='#FF9800', label='cmpctblk (HB)'),
+    Line2D([0], [0], color='#F44336', label='inv'),
+]
+
+# Plot each block hash individually IF it has > 10 announcements AND is a slow run
+unique_hashes = df_filtered[df_filtered['run'] != 'none']['block_hash'].unique()
+for b_hash in unique_hashes:
+    block_subset = df_filtered[df_filtered['block_hash'] == b_hash]
+
+    # Skip blocks with 10 or fewer announcements
+    if len(block_subset) <= 10:
+        continue
+
+    speed = block_subset['validation-speed'].iloc[0]
+
+    # Type 1 (Inv)
+    subset1 = block_subset[block_subset['announcement_type'] == 1]
+    if not subset1.empty:
+        ax = sns.ecdfplot(data=subset1, x='delta_ms', color=color_logic[(speed, 1)], alpha=0.4)
+
+    # Type 3 (Compact Block)
+    subset3 = block_subset[block_subset['announcement_type'] == 3]
+    if not subset3.empty:
+        ax = sns.ecdfplot(data=subset3, x='delta_ms', color=color_logic[(speed, 3)], alpha=0.4)
+
+plt.gca().xaxis.set_major_formatter(mticker.FuncFormatter(time_formatter))
+plt.gca().yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+plt.gca().yaxis.set_major_locator(mticker.MultipleLocator(0.10))
+
+plt.legend(handles=legend_elements, loc='lower right', title="annoucement type")
+
+for i, (label, color) in enumerate([(1, '#F44336'), (3, '#FF9800')]):
+    subset = df_filtered[(df_filtered['announcement_type'] == label) & (df_filtered['validation-speed'] == "slow")]['delta_ms']
+    values = np.percentile(subset, [25, 50, 75, 90])
+    for p, v in zip([25, 50, 75, 90], values):
+        ax.axvline(x=v, ymax=0.01*p, color="black", linestyle='--', alpha=0.3)
+        ax.annotate(f'p{p}: {duration_formatter(v)}', xy=(v, 0.01*p),
+                    color=color, fontsize=12, ha='center', va='bottom',
+                    xytext=(5, 0), textcoords='offset points',
+                    bbox=dict(facecolor='white', alpha=0.9, edgecolor='gray', pad=2))
+
+plt.title('ECDF of block propagation (slow-to-validate blocks only)')
+plt.xlabel('Duration since first annoucement of block (RTT ajusted)')
+plt.ylabel('Proportion of Peers')
+plt.grid(True, which='both', linestyle='--', alpha=0.5)
+plt.xlim(0, 2 * 60 * 1000)
+plt.show()
+
+### [CODE 17]
+
+
+### [MD 18]
+# Validation duration
+
+### [CODE 19]
+median_rtts = df_master.groupby('peer_addr')['rtt_ms'].median().to_dict()
+
+# State per peer: tracks the open window
+peer_state = {}  # peer_addr -> {block_hash, t_start, connection_id, run}
+results = []
+
+for row in df_master.itertuples():
+    peer_addr = row.peer_addr
+    state = peer_state.get(peer_addr)
+
+    # Reset state on connection change
+    if state and state['connection_id'] != row.connection_id:
+        state = None
+        peer_state.pop(peer_addr, None)
+
+    # --- Try to close an open window first ---
+    if state is not None:
+        if row.announcement_type == 5 and row.block_hash == state['block_hash']:
+            # Completed with a BlockTxn for the same block
+            seq_type = '4-to-5'
+        elif row.announcement_type in [3, 4] and row.block_hash != state['block_hash']:
+            # New block arrived before we got a type 5 → close as timeout
+            seq_type = '4-to-3'
+        else:
+            seq_type = None
+
+        if seq_type:
+            rtt = median_rtts.get(peer_addr, row.rtt_ms)
+            _, _, _, d, longer_than_rtt = calc_timings(state['t_start'], row.timestamp_ms, rtt)
+            results.append({
+                'peer_addr': peer_addr,
+                'prev_block_hash': state['block_hash'],
+                'trigger_block_hash': row.block_hash,
+                'trigger_type': row.announcement_type,
+                'type': seq_type,
+                'duration_ms': d,
+                'run': state['run'],
+                'median_rtt_ms': rtt,
+                'network': row.network,
+                'longer_than_rtt': longer_than_rtt,
+            })
+            # Window is closed
+            state = None
+            peer_state.pop(peer_addr, None)
+
+    # --- Open a new window on type 4 (only if no window is currently open) ---
+    if row.announcement_type == 4 and state is None:
+        peer_state[peer_addr] = {
+            'block_hash': row.block_hash,
+            't_start': row.timestamp_ms,
+            'connection_id': row.connection_id,
+            'run': row.run,
+        }
+
+df_results = pd.DataFrame(results)
+df_results['network'] = df_results['peer_addr'].apply(
+    lambda x: 'onion' if '.onion' in x else 'ipv4'
+)
+
+display(df_results.head())
+print(f'Total sequences captured: {len(df_results)}')
+
+### [CODE 20]
+plt.figure(figsize=(12, 6))
+
+df_plot = df_results.copy()
+df_plot["validation-speed"] = df_plot.run.apply(lambda x: "normal" if x == "none" else "slow")
+
+bins = np.logspace(np.log10(1), np.log10(df_plot['duration_ms'].max()), 200)
+
+palette={True: "green", False: "green"}
+
+# Plot for 'normal'
+ax = sns.histplot(data=df_plot[df_plot['validation-speed'] == 'normal'], x='duration_ms', bins=bins, stat="percent", palette=palette, multiple="stack", hue="longer_than_rtt")
+
+# Plot for 'slow'
+sns.histplot(data=df_plot[df_plot['validation-speed'] == 'slow'], x='duration_ms', bins=bins, ax=ax, stat="percent", multiple="stack", color="red")
+
+hue_levels = df_plot["longer_than_rtt"].unique()
+
+for container, level in zip(ax.containers, hue_levels):
+    if level == True:
+        for bar in container:
+            bar.set_hatch("////")
+
+plt.gca().yaxis.set_major_formatter(mticker.PercentFormatter(xmax=100))
+
+ax.set_xscale('log')
+ax.xaxis.set_major_formatter(mticker.FuncFormatter(time_formatter))
+ax.set_xticks([1, 5, 10, 25, 100, 500, 1000, 3000, 10000, 30000, 60000, 180_000, 300_000, 600_000])
+ax.set_xlim(1, 5*600_000)
+ax.grid(True, which='both', linestyle='--', alpha=0.5)
+ax.set_xlabel("measured block validation duration")
+ax.set_ylabel("share of measurements")
+ax.set_title('Distribution of measured validation durations for normal and slow-to-validate blocks')
+
+
+legend_handles = [
+    mpatches.Patch(facecolor="green", label="normal blocks"),
+    mpatches.Patch(facecolor="green", hatch="////", label="normal blocks (upper-bound)"),
+    mpatches.Patch(facecolor="red", label="slow-to-validate blocks"),
+]
+
+ax.legend(handles=legend_handles, title="")
+
+
+plt.tight_layout()
+plt.show()
+
+### [CODE 21]
+plt.figure(figsize=(12, 6))
+
+color_map = {"normal": "green", "slow": "red"}
+unique_blocks = df_results['trigger_block_hash'].unique()
+
+for b_hash in unique_blocks:
+    block_data = df_results[df_results['trigger_block_hash'] == b_hash].copy()
+
+    if block_data.empty:
+        continue
+
+    speed = "normal" if block_data['run'].iloc[0] == "none" else "slow"
+    color = color_map[speed]
+    alpha = 0.2 if speed == "normal" else 0.5
+
+    ax = sns.ecdfplot(
+        data=block_data,
+        x='duration_ms',
+        color=color,
+        alpha=alpha
+    )
+
+plt.xscale('log')
+plt.gca().xaxis.set_major_formatter(mticker.FuncFormatter(time_formatter))
+plt.xticks([1, 10, 100, 500, 1000, 3000, 5_000, 10_000, 20000, 60000, 180_000, 300_000, 600_000])
+
+# Set y-axis ticks to every 5%
+plt.gca().yaxis.set_major_locator(mticker.MultipleLocator(0.10))
+plt.gca().yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+
+plt.title('ECDF of measured block validation durations')
+plt.ylabel('proportion of peers')
+plt.xlabel('Measured block validation duration')
+plt.grid(True, which='both', linestyle='--', alpha=0.5)
+plt.xlim(1, df_results['duration_ms'].max())
+plt.ylim(-0.01, 1.01)
+
+# Simplified legend
+from matplotlib.lines import Line2D
+legend_elements = [
+    Line2D([0], [0], color='green', label='Normal blocks'),
+    Line2D([0], [0], color='red', label='Slow blocks')
+]
+plt.legend(handles=legend_elements, loc='center right')
+
+for i, (label, color) in enumerate([('normal', '#4CAF50'), ('slow', '#F44336')]):
+    subset = df_plot[df_plot['validation-speed'] == label]['duration_ms']
+    values = np.percentile(subset, [25, 50, 75, 90])
+    for p, v in zip([25, 50, 75, 90], values):
+        ax.axvline(x=v, ymax=0.01*p, color="black", linestyle='--', alpha=0.5)
+        ax.annotate(f'p{p}: {duration_formatter(v)}', xy=(v, 0.01*p),
+                    color=color, fontsize=12, ha='center', va='bottom',
+                    xytext=(5, 0), textcoords='offset points',
+                    bbox=dict(facecolor='white', alpha=0.9, edgecolor='black', pad=2))
+
+plt.tight_layout()
+plt.show()
+
+### [CODE 22]
+plt.figure(figsize=(10, 6))
+
+# 1. Calculate the baseline (median) for each peer during 'normal' runs
+baselines = df_results[df_results['run'] == 'none'].groupby('peer_addr')['duration_ms'].median()
+
+# 2. Filter for 'slow' block measurements and map the baseline
+df_slow = df_results[df_results['run'] != 'none'].copy()
+df_slow['baseline_ms'] = df_slow['peer_addr'].map(baselines)
+
+# 3. Calculate the multiple (Slow Duration / Normal Baseline)
+df_slow = df_slow.dropna(subset=['baseline_ms'])
+df_slow['slowdown_multiple'] = df_slow['duration_ms'] / df_slow['baseline_ms']
+
+# 4. Calculate the median multiple per peer, keeping the longer_than_rtt info
+# We take the mean of the boolean longer_than_rtt; 1.0 means it was always longer than RTT for that peer's slow blocks
+peer_medians = df_slow.groupby('peer_addr').agg({
+    'slowdown_multiple': 'median',
+    'longer_than_rtt': 'mean'
+}).reset_index()
+
+peer_medians = peer_medians.sort_values('slowdown_multiple')
+
+
+# Calculate the ECDF for the median slowdown multiples
+ax = sns.ecdfplot(data=peer_medians, x='slowdown_multiple', color='red')
+
+# Formatting the plot
+plt.xscale('log')
+
+def format_func(x, pos):
+    if x >= 1:
+        return f"{int(round(x))}x"
+    return f"{x:g}x"
+
+plt.gca().xaxis.set_major_formatter(mticker.FuncFormatter(format_func))
+
+plt.xticks([1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000])
+
+plt.gca().yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+plt.gca().yaxis.set_major_locator(mticker.MultipleLocator(0.10))
+
+plt.title('ECDF of median validation slowdown for slow-to-validate blocks')
+plt.xlabel('slowdown multiple (x times longer than normal)')
+plt.ylabel('Proportion of peers')
+plt.grid(True, which='both', linestyle='--', alpha=0.3)
+plt.xlim(0.8, 10000)
+
+plt.axvline(x=1, color='black', linestyle='--')
+plt.annotate(f'normal\nblock validation\nbaseline', xy=(1, 0.9), xytext=(8, -10),
+                 textcoords='offset points', color='black')
+
+for p in [10, 25, 50, 75, 90]:
+    val = np.percentile(peer_medians['slowdown_multiple'], p)
+    plt.axvline(x=val, ymax=p*0.01, color='gray', linestyle='--', alpha=0.5)
+    plt.annotate(f'p{p}: {val:.1f}x', xy=(val, p/100), xytext=(8, -5),
+                 textcoords='offset points', color='black', bbox=dict(facecolor='white', alpha=0.9, edgecolor='black', pad=3))
+
+plt.tight_layout()
+plt.show()
+
+### [MD 23]
+## QA
+
+### [CODE 24]
+# 1. Create a unique mapping of (peer_addr, block_hash) -> user_agent from df_master
+# This avoids the 'non-unique multi-index' error during reindexing
+ua_lookup = df_master[['peer_addr', 'block_hash', 'user_agent']].drop_duplicates(['peer_addr', 'block_hash'])
+ua_lookup = ua_lookup.set_index(['peer_addr', 'block_hash'])['user_agent']
+
+# 2. Filter df_results for slow runs
+emzy_results = df_results[df_results['run'] != 'none'].copy()
+
+# 3. Map user agents onto the results using a MultiIndex lookup
+target_index = pd.MultiIndex.from_frame(emzy_results[['peer_addr', 'prev_block_hash']])
+emzy_results['user_agent'] = ua_lookup.reindex(target_index).values
+
+# 4. Final filter for 'emzy' in the user agent
+emzy_results = emzy_results[emzy_results['user_agent'].str.contains('emzy', case=False, na=False)]
+
+# Selecting requested columns
+display_cols = ['peer_addr', 'prev_block_hash', 'duration_ms', 'run', 'user_agent']
+
+if not emzy_results.empty:
+    print(f"Found {len(emzy_results)} validation events for 'emzy' peers during slow runs:")
+    display(emzy_results[display_cols].rename(columns={'duration_ms': 'validation_duration_ms', 'prev_block_hash': 'block_hash'}))
+else:
+    print("No validation events found for peers with 'emzy' in their user agent during the slow runs.")
+
+### [CODE 25]
+# 1. Create a unique mapping of (peer_addr, block_hash) -> user_agent from df_master
+# This avoids the 'non-unique multi-index' error during reindexing
+ip_lookup = df_master[['peer_addr', 'block_hash', 'user_agent']].drop_duplicates(['peer_addr', 'block_hash'])
+ip_lookup = ip_lookup.set_index(['peer_addr', 'block_hash'])['user_agent']
+
+# 2. Filter df_results for slow runs
+filtered_results = df_results[df_results['run'] != 'none'].copy()
+
+# 3. Map user agents onto the results using a MultiIndex lookup
+target_index = pd.MultiIndex.from_frame(filtered_results[['peer_addr', 'prev_block_hash']])
+filtered_results['user_agent'] = ip_lookup.reindex(target_index).values
+
+# 4. Final filter for 'emzy' in the user agent
+filtered_results = filtered_results[filtered_results['peer_addr'].str.contains('159.69.116.100:38333', case=False, na=False)]
+
+# Selecting requested columns
+display_cols = ['peer_addr', 'prev_block_hash', 'duration_ms', 'run', 'user_agent']
+
+if not filtered_results.empty:
+    print(f"Found {len(filtered_results)} validation events for '159.69.116.100:38333' the peer during slow runs:")
+    display(filtered_results[display_cols].rename(columns={'duration_ms': 'validation_duration_ms', 'prev_block_hash': 'block_hash'}))
+
+### [CODE 26]
+def calc_diff_ms(t1, t2):
+  t1 = datetime.fromisoformat(t1)
+  t2 = datetime.fromisoformat(t2)
+
+  diff = t2 - t1
+  return int(diff.total_seconds()*1000)
+
+log = {
+    "0000000eb552c9f26e712d546c71297fd0623890299b40e7ada81d2dc32f5d0b": calc_diff_ms("2026-04-08T14:05:12.422939", "2026-04-08T14:06:34.461329"),
+    "000000002b3a132836666c18f5e1a9d93623d3797316a968ee54e47fb44c0c13": calc_diff_ms("2026-04-08T14:06:35.035110", "2026-04-08T14:07:56.849550"),
+    "00000006d34037534a517f9e5809a34766f1540c0e6817eac91b1adfee50cb5f": calc_diff_ms("2026-04-08T14:07:57.730291", "2026-04-08T14:09:14.099175"),
+    "00000014a4cae4501f98539b45c76059c706a82b77f19a9adf365b3f5e989444": calc_diff_ms("2026-04-08T14:09:14.665744", "2026-04-08T14:10:33.333406"),
+    "00000003220437cb8b5a2edef6be828c5cdad114b1b642d724ac6f3caa7f12fb": calc_diff_ms("2026-04-08T14:10:34.050176", "2026-04-08T14:11:52.621433"),
+    "000000143c97bf0134c5cf0881dfd4ef458529b7388cacf43981ffe92fb96856": calc_diff_ms("2026-04-08T14:11:53.943147", "2026-04-08T14:13:27.484349"),
+}
+
+
+
+# Map log values to the filtered results
+comparison_df = filtered_results.copy()
+comparison_df['log_val_ms'] = comparison_df['prev_block_hash'].map(log)
+
+# Only keep rows where we have a log match
+comparison_df = comparison_df.dropna(subset=['log_val_ms'])
+
+# Calculate delta and error percentage
+comparison_df['delta_ms'] = comparison_df['duration_ms'] - comparison_df['log_val_ms']
+comparison_df['error_pct'] = (comparison_df['delta_ms'] / comparison_df['log_val_ms']) * 100
+
+# Display the results
+display_cols = ['duration_ms', 'log_val_ms', 'delta_ms', 'error_pct', 'prev_block_hash']
+print("Comparison between measured validation duration and log values:")
+display(comparison_df[display_cols].rename(columns={'duration_ms': 'measured_ms', 'prev_block_hash': 'block_hash'}))
+
+### [CODE 27]
+print(comparison_df[display_cols].rename(columns={'duration_ms': 'measured', 'prev_block_hash': 'block', 'log_val_ms': 'actual (from log)','error_pct': 'error', "delta_ms":"delta" }).to_markdown(index=False))
+
+### [CODE 28]

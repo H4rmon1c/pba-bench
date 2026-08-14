@@ -1,0 +1,200 @@
+[
+  {
+    "run": {
+      "run_id": "smoke-1786734192-c1-r1",
+      "profile": "smoke",
+      "timestamp_utc": "2026-08-14T19:03:13+00:00",
+      "seed": 1
+    },
+    "provenance": {
+      "node_version": 310100,
+      "node_subversion": "/Satoshi:31.1.0/",
+      "node_version_string": "Bitcoin Core daemon version v31.1.0 bitcoind",
+      "node_git_commit": "",
+      "compiler": "",
+      "build_type": "",
+      "bitcoind_path": "/usr/local/bin/bitcoind",
+      "kernel": "6.12.38+deb13-amd64",
+      "os_name": "Linux",
+      "machine": "x86_64",
+      "cpu_model": "Intel(R) Xeon(R) CPU E5-2680 0 @ 2.70GHz",
+      "core_count": 32,
+      "physical_cores": 16,
+      "total_ram_bytes": 270411051008,
+      "validation_threads": 0,
+      "warm_cold": "cold"
+    },
+    "construction": {
+      "num_utxos": 500,
+      "sigops_per_input": 1,
+      "num_prep_blocks": 1,
+      "num_prep_transactions": 1,
+      "total_legacy_sigops_bip54": 500,
+      "poison_tx_vin_count": 500,
+      "poison_tx_vout_count": 1,
+      "poison_tx_size_bytes": 56792,
+      "poison_tx_weight": 227168,
+      "expected_sighash_preimage_bytes": 10280500,
+      "theoretical_sighash_preimage_bytes_no_cache": 10280500,
+      "per_input_preimage_bytes": 20561.0,
+      "vector": "scriptpubkey",
+      "poison_block_size_bytes": 56970,
+      "poison_block_weight": 227880
+    },
+    "outcome": {
+      "success": "accepted",
+      "rejection_reason": "",
+      "block_hash": "62ce6af7f5dc50c8bd4dae1a8eaa8b467ba70cab22a9aba0bbb898b8606b55b6",
+      "block_height": 103,
+      "bip54_would_reject": false
+    },
+    "measurement": {
+      "baseline_wall_seconds": 0.0018713539466261864,
+      "validation_wall_seconds": 0.015922,
+      "validation_cpu_seconds": 0.15,
+      "peak_rss_bytes": 52486144,
+      "rpc_probe_count": 1,
+      "rpc_probe_max_seconds": 0.000838,
+      "rpc_probe_median_seconds": 0.000838,
+      "block_tx_count": 2
+    },
+    "limits": {
+      "max_wall_seconds": 600,
+      "max_peak_rss_mb": 8192,
+      "max_blocks": 400,
+      "max_poison_tx_bytes": 3900000
+    }
+  },
+  {
+    "run": {
+      "run_id": "smoke-1786734192-c2-r1",
+      "profile": "smoke",
+      "timestamp_utc": "2026-08-14T19:03:16+00:00",
+      "seed": 1
+    },
+    "provenance": {
+      "node_version": 310100,
+      "node_subversion": "/Satoshi:31.1.0/",
+      "node_version_string": "Bitcoin Core daemon version v31.1.0 bitcoind",
+      "node_git_commit": "",
+      "compiler": "",
+      "build_type": "",
+      "bitcoind_path": "/usr/local/bin/bitcoind",
+      "kernel": "6.12.38+deb13-amd64",
+      "os_name": "Linux",
+      "machine": "x86_64",
+      "cpu_model": "Intel(R) Xeon(R) CPU E5-2680 0 @ 2.70GHz",
+      "core_count": 32,
+      "physical_cores": 16,
+      "total_ram_bytes": 270411051008,
+      "validation_threads": 0,
+      "warm_cold": "cold"
+    },
+    "construction": {
+      "num_utxos": 1000,
+      "sigops_per_input": 1,
+      "num_prep_blocks": 1,
+      "num_prep_transactions": 1,
+      "total_legacy_sigops_bip54": 1000,
+      "poison_tx_vin_count": 1000,
+      "poison_tx_vout_count": 1,
+      "poison_tx_size_bytes": 113482,
+      "poison_tx_weight": 453928,
+      "expected_sighash_preimage_bytes": 41061000,
+      "theoretical_sighash_preimage_bytes_no_cache": 41061000,
+      "per_input_preimage_bytes": 41061.0,
+      "vector": "scriptpubkey",
+      "poison_block_size_bytes": 113660,
+      "poison_block_weight": 454640
+    },
+    "outcome": {
+      "success": "accepted",
+      "rejection_reason": "",
+      "block_hash": "6ca1f70e83d14c8299df50044dc6c6482b70b4ce080bcb222aceda08ef1d2e0d",
+      "block_height": 103,
+      "bip54_would_reject": false
+    },
+    "measurement": {
+      "baseline_wall_seconds": 0.0010949630523100495,
+      "validation_wall_seconds": 0.068932,
+      "validation_cpu_seconds": 0.77,
+      "peak_rss_bytes": 53575680,
+      "rpc_probe_count": 2,
+      "rpc_probe_max_seconds": 0.044331,
+      "rpc_probe_median_seconds": 0.022733,
+      "block_tx_count": 2
+    },
+    "limits": {
+      "max_wall_seconds": 600,
+      "max_peak_rss_mb": 8192,
+      "max_blocks": 400,
+      "max_poison_tx_bytes": 3900000
+    }
+  },
+  {
+    "run": {
+      "run_id": "smoke-1786734192-c3-r1",
+      "profile": "smoke",
+      "timestamp_utc": "2026-08-14T19:03:31+00:00",
+      "seed": 1
+    },
+    "provenance": {
+      "node_version": 310100,
+      "node_subversion": "/Satoshi:31.1.0/",
+      "node_version_string": "Bitcoin Core daemon version v31.1.0 bitcoind",
+      "node_git_commit": "",
+      "compiler": "",
+      "build_type": "",
+      "bitcoind_path": "/usr/local/bin/bitcoind",
+      "kernel": "6.12.38+deb13-amd64",
+      "os_name": "Linux",
+      "machine": "x86_64",
+      "cpu_model": "Intel(R) Xeon(R) CPU E5-2680 0 @ 2.70GHz",
+      "core_count": 32,
+      "physical_cores": 16,
+      "total_ram_bytes": 270411051008,
+      "validation_threads": 0,
+      "warm_cold": "cold"
+    },
+    "construction": {
+      "num_utxos": 2000,
+      "sigops_per_input": 1,
+      "num_prep_blocks": 1,
+      "num_prep_transactions": 1,
+      "total_legacy_sigops_bip54": 2000,
+      "poison_tx_vin_count": 2000,
+      "poison_tx_vout_count": 1,
+      "poison_tx_size_bytes": 227038,
+      "poison_tx_weight": 908152,
+      "expected_sighash_preimage_bytes": 164122000,
+      "theoretical_sighash_preimage_bytes_no_cache": 164122000,
+      "per_input_preimage_bytes": 82061.0,
+      "vector": "scriptpubkey",
+      "poison_block_size_bytes": 227216,
+      "poison_block_weight": 908864
+    },
+    "outcome": {
+      "success": "accepted",
+      "rejection_reason": "",
+      "block_hash": "7f16ce654948696a18d3e2c872f418f036daa56f3947dad33230d21f70ad0593",
+      "block_height": 103,
+      "bip54_would_reject": false
+    },
+    "measurement": {
+      "baseline_wall_seconds": 0.0023324399953708053,
+      "validation_wall_seconds": 0.133388,
+      "validation_cpu_seconds": 1.57,
+      "peak_rss_bytes": 55390208,
+      "rpc_probe_count": 3,
+      "rpc_probe_max_seconds": 0.087239,
+      "rpc_probe_median_seconds": 0.004408,
+      "block_tx_count": 2
+    },
+    "limits": {
+      "max_wall_seconds": 600,
+      "max_peak_rss_mb": 8192,
+      "max_blocks": 400,
+      "max_poison_tx_bytes": 3900000
+    }
+  }
+]

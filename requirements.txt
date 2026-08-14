@@ -1,0 +1,5 @@
+# pba-bench runtime dependencies (install into a virtualenv).
+# coincurve (C-backed secp256k1) makes construction dramatically faster; the
+# benchmark falls back to pure-Python signing if it is unavailable.
+psutil>=5.9
+coincurve>=19

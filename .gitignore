@@ -1,0 +1,21 @@
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# --- Bitcoin Core source clone (reference only; test_framework is vendored) ---
+bitcoin-src/
+
+# --- Disposable node datadirs ---
+work/
+
+# --- Bulky raw research downloads (kept out of git; see research/README.md) ---
+research/*.html
+research/*.diff
+research/*.ipynb
+research/api_*.json
+
+# --- Editor / OS ---
+*.swp
+.DS_Store

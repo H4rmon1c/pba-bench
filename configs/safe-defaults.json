@@ -1,0 +1,23 @@
+{
+  "safety": {
+    "chain": "regtest",
+    "rpc_host": "127.0.0.1",
+    "disable_networking": true,
+    "fresh_disposable_datadir": true,
+    "reject_existing_datadir": true,
+    "reject_symlink_escape": true,
+    "reject_non_loopback_rpc": true,
+    "verify_chain_via_rpc": true
+  },
+  "limits": {
+    "max_wall_seconds": 600,
+    "max_peak_rss_mb": 8192,
+    "max_blocks": 400,
+    "max_poison_tx_bytes": 900000
+  },
+  "profiles": {
+    "smoke":  {"num_utxos": 10,  "sigops_per_input": 2,  "confirm_required": false},
+    "small":  {"num_utxos": 500, "sigops_per_input": 6,  "confirm_required": false},
+    "medium": {"num_utxos": 2500,"sigops_per_input": 4,  "confirm_required": true}
+  }
+}

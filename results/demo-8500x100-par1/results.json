@@ -1,0 +1,68 @@
+[
+  {
+    "run": {
+      "run_id": "custom-1786672240-c1-r1",
+      "profile": "custom",
+      "timestamp_utc": "2026-08-14T01:53:36+00:00",
+      "seed": 41
+    },
+    "provenance": {
+      "node_version": 310100,
+      "node_subversion": "/Satoshi:31.1.0/",
+      "node_version_string": "Bitcoin Core daemon version v31.1.0 bitcoind",
+      "node_git_commit": "",
+      "compiler": "",
+      "build_type": "",
+      "bitcoind_path": "/usr/local/bin/bitcoind",
+      "kernel": "6.12.38+deb13-amd64",
+      "os_name": "Linux",
+      "machine": "x86_64",
+      "cpu_model": "Intel(R) Xeon(R) CPU E5-2680 0 @ 2.70GHz",
+      "core_count": 32,
+      "physical_cores": 16,
+      "total_ram_bytes": 270411051008,
+      "validation_threads": 1,
+      "warm_cold": "cold"
+    },
+    "construction": {
+      "num_utxos": 8500,
+      "sigops_per_input": 100,
+      "num_prep_blocks": 44,
+      "num_prep_transactions": 44,
+      "total_legacy_sigops_bip54": 850000,
+      "poison_tx_vin_count": 8500,
+      "poison_tx_vout_count": 1,
+      "poison_tx_size_bytes": 964692,
+      "poison_tx_weight": 3858768,
+      "expected_sighash_preimage_bytes": 2993079500,
+      "theoretical_sighash_preimage_bytes_no_cache": 299307950000,
+      "per_input_preimage_bytes": 352127.0,
+      "vector": "scriptpubkey",
+      "poison_block_size_bytes": 964871,
+      "poison_block_weight": 3859484
+    },
+    "outcome": {
+      "success": "accepted",
+      "rejection_reason": "",
+      "block_hash": "40e189c3ac558a5f889af69b670e714479cdf7e3a1b6b9490ecad218d3900c82",
+      "block_height": 146,
+      "bip54_would_reject": true
+    },
+    "measurement": {
+      "baseline_wall_seconds": 0.0012623739894479513,
+      "validation_wall_seconds": 85.083686,
+      "validation_cpu_seconds": 85.12,
+      "peak_rss_bytes": 162385920,
+      "rpc_probe_count": 4,
+      "rpc_probe_max_seconds": 24.936292,
+      "rpc_probe_median_seconds": 0.007716,
+      "block_tx_count": 2
+    },
+    "limits": {
+      "max_wall_seconds": 600,
+      "max_peak_rss_mb": 8192,
+      "max_blocks": 400,
+      "max_poison_tx_bytes": 3900000
+    }
+  }
+]
