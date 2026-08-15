@@ -220,3 +220,48 @@ def test_safe_config_defaults_to_networking_disabled(workspace):
     assert "-listen=0" in args
     assert "-dnsseed=0" in args
     assert "-discover=0" in args
+
+
+# --------------------------------------------------------------------------- #
+# Loopback P2P peering (multi-node propagation demo)
+# --------------------------------------------------------------------------- #
+
+def _mk_cfg(workspace, **kw):
+    validator = SafetyValidator(workspace)
+    return SafeConfig(bitcoind_path=Path("/bin/true"),
+                      datadir=validator.prepare_datadir(None), **kw)
+
+
+def test_loopback_p2p_listener_args(workspace):
+    cfg = _mk_cfg(workspace, p2p_listen_port=18444, disable_networking=False)
+    args = cfg.build_bitcoind_args()
+    assert "-listen=1" in args
+    assert f"-port=18444" in args
+    assert f"-bind=127.0.0.1" in args
+    assert "-connect=0" in args
+    assert "-dnsseed=0" in args
+
+
+def test_loopback_p2p_peer_args(workspace):
+    validator = SafetyValidator(workspace)
+    cfg = _mk_cfg(workspace, p2p_peers=["127.0.0.1:18444"], disable_networking=False)
+    cfg.p2p_peers = validator.validate_p2p_peers(cfg.p2p_peers)
+    args = cfg.build_bitcoind_args()
+    assert "-connect=127.0.0.1:18444" in args
+    assert "-listen=0" in args
+
+
+@pytest.mark.parametrize("peer", ["8.8.8.8:8333", "10.0.0.1:8333", "0.0.0.0:1"])
+def test_non_loopback_p2p_peer_rejected(workspace, peer):
+    validator = SafetyValidator(workspace)
+    with pytest.raises(SafetyError):
+        validator.validate_p2p_peers([peer])
+
+
+def test_p2p_bind_host_must_be_loopback(workspace):
+    validator = SafetyValidator(workspace)
+    with pytest.raises(SafetyError):
+        validator.validate_p2p_peers([], bind_host="0.0.0.0")
+    with pytest.raises(SafetyError):
+        _mk_cfg(workspace, p2p_listen_port=18444, p2p_bind_host="0.0.0.0",
+                disable_networking=False).build_bitcoind_args()

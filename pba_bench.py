@@ -84,6 +84,45 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_propagate(args) -> int:
+    """Run the multi-node propagation / consequence demo."""
+    from benchmark import BenchmarkConfig, export_results
+    from propagation import PropagationBenchmark, PropagationConfig
+
+    if not args.confirm:
+        print("ERROR: --profile propagate requires --confirm (it builds a poison block "
+              "and measures its effect on peered local regtest nodes).", file=sys.stderr)
+        return 2
+
+    bench = BenchmarkConfig(
+        bitcoind_path=args.bitcoind,
+        profile="propagate",
+        seed=args.seed,
+        outdir=args.outdir,
+        keep_datadir=args.keep_datadir,
+        rpc_host=args.rpc_host,
+        extra_args=args.extra_arg,
+        max_wall_seconds=args.max_wall_seconds or 3600,
+    )
+    if args.max_rss_mb is not None: bench.max_peak_rss_mb = args.max_rss_mb
+    if args.max_blocks is not None: bench.max_blocks = args.max_blocks
+
+    prop = PropagationConfig(
+        seed=args.seed,
+        num_utxos=args.num_utxos or 2000,
+        sigops_per_input=args.sigops_per_input or 100,
+        observer_par=args.observer_par,
+        num_observers=args.observers,
+    )
+
+    result = PropagationBenchmark(prop, bench, WORKSPACE, print).run()
+    outdir = Path(args.outdir) / "propagation"
+    outdir.mkdir(parents=True, exist_ok=True)
+    export_results([result], outdir)
+    print(f"\nresults written: {outdir / 'results.json'}, {outdir / 'results.csv'}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="pba-bench",
@@ -109,6 +148,18 @@ def main(argv=None) -> int:
     pr.add_argument("json", type=Path)
     pr.add_argument("--output", type=Path, default=None)
     pr.set_defaults(func=cmd_report)
+
+    pp = sub.add_parser("propagate",
+                        help="multi-node propagation/consequence demo (loopback-only regtest network)")
+    _add_common(pp)
+    pp.add_argument("--confirm", action="store_true",
+                    help="acknowledge running the multi-node propagation demo")
+    pp.add_argument("--num-utxos", type=int, default=None, help="poison inputs (N), default 2000")
+    pp.add_argument("--sigops-per-input", type=int, default=None, help="CHECKSIG/input (K), default 100")
+    pp.add_argument("--observer-par", type=int, default=1,
+                    help="validation threads on observers (1 = slow single-thread)")
+    pp.add_argument("--observers", type=int, default=1, help="number of observer nodes")
+    pp.set_defaults(func=cmd_propagate)
 
     args = p.parse_args(argv)
     return args.func(args)

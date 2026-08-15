@@ -1,0 +1,49 @@
+[
+  {
+    "run": {
+      "profile": "propagation",
+      "timestamp_utc": "2026-08-15T02:18:07+00:00",
+      "seed": 1
+    },
+    "topology": {
+      "num_observers": 1,
+      "observer_validation_threads": 1,
+      "peering": "loopback-only P2P between local regtest nodes"
+    },
+    "construction": {
+      "num_utxos": 8500,
+      "sigops_per_input": 100,
+      "total_legacy_sigops_bip54": 850000,
+      "poison_tx_vin_count": 8500,
+      "poison_tx_size_bytes": 964796,
+      "poison_tx_weight": 3859184,
+      "poison_block": "2f47c0e0f9984627fa063d2014d31931adeedd902b38b524c31cc059453cd78d"
+    },
+    "baseline": {
+      "baseline_propagation_seconds": 0.005194,
+      "baseline_submit_wall_seconds": 0.003422,
+      "baseline_block": "398fa0cfc26864582ecc8bf15fe088f5d7504ec79f432249167f5b8c337d8736"
+    },
+    "poison": {
+      "submit_accepted": true,
+      "submit_wall_seconds": 6.416134,
+      "propagation_to_observer_seconds": 96.763078,
+      "propagation_after_miner_seconds": 89.941233,
+      "observer_saw_poison": true
+    },
+    "stale_tip_duration_seconds": 96.763078,
+    "observer_rpc_during_validation": {
+      "rpc_probe_count": 314,
+      "rpc_probe_max_seconds": 29.841517,
+      "rpc_probe_median_seconds": 0.000789,
+      "observer_tip_updated": true
+    },
+    "observers": [
+      {
+        "observer": 1,
+        "best_blockhash": "2f47c0e0f9984627fa063d2014d31931adeedd902b38b524c31cc059453cd78d",
+        "blocks": 146
+      }
+    ]
+  }
+]

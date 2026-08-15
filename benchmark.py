@@ -114,9 +114,12 @@ def _free_port() -> int:
 
 
 class Node:
-    """Owns a freshly launched, isolated regtest bitcoind."""
+    """Owns a freshly launched, isolated (or loopback-peered) regtest bitcoind."""
 
-    def __init__(self, cfg: BenchmarkConfig, workspace: Path, log):
+    def __init__(self, cfg: BenchmarkConfig, workspace: Path, log,
+                 *, p2p_peers: list | None = None,
+                 p2p_listen_port: int = 0,
+                 p2p_bind_host: str = "127.0.0.1"):
         self.cfg = cfg
         self.log = log
         self.port = _free_port()
@@ -137,7 +140,12 @@ class Node:
                 "max_poison_tx_bytes": cfg.max_poison_tx_bytes,
             },
             keep_datadir=cfg.keep_datadir,
+            p2p_peers=p2p_peers or [],
+            p2p_listen_port=p2p_listen_port,
+            p2p_bind_host=p2p_bind_host,
         )
+        self.safe_cfg.p2p_peers = validator.validate_p2p_peers(
+            self.safe_cfg.p2p_peers, p2p_bind_host)
         self.safe_cfg.extra_args = validator.validate_extra_args(
             cfg.extra_args + ([f"-par={cfg.validation_threads}"] if cfg.validation_threads else [])
         )

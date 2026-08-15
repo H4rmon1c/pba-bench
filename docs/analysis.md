@@ -140,9 +140,27 @@ more aggressively.
 
 * Portland's exact worst-case figures and generator.
 * The `scriptSig`-family (P2SH) vector.
-* P2P block-propagation timing and stale-block effects (needs a multi-node P2P setup
-  as in the 0xB10C study).
+* Full peer-to-peer propagation *topology* (a large network of nodes) — we demonstrate
+  single-peer propagation on a small private loopback network (see §10); the 0xB10C
+  multi-peer signet measurement is not reproduced at scale.
 * A live BIP 54 consensus rejection (needs a BIP 54 build).
+
+## 10. Multi-node propagation (the `propagate` demo)
+
+We also measure the *consequences* on a private loopback-only regtest network: a miner
+peers with observer nodes over loopback P2P, and we time how a poison block reaches a
+peer compared with a normal block. Measured (v31.1.0, Xeon E5-2680, `-par=1` observer):
+
+| | normal block | poison (N=8500, 850k sigops) |
+|---|---|---|
+| propagation to peer | ~5 ms | ~97 s |
+| peer tip stays stale | ~0 | ~97 s |
+| peer RPC blocked (max) | — | ~30 s |
+
+This is the network-level blast radius: a poison block stalls a peer's validation,
+blocks its RPC, and keeps it working on a stale tip — the conditions that lead to
+stale blocks and wasted mining work. It is the same phenomenon 0xB10C measured on
+signet, reproduced locally and safely.
 
 ## 9. Security model
 

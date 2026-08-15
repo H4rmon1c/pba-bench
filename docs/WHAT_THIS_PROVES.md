@@ -62,7 +62,7 @@ third-party nodes.
 | Not proven | Why |
 |---|---|
 | Portland HODL's ~25-minute worst case, reproduced exactly | The exact generator is not public; and three consensus limits cap a *single* block (see §6). We reproduce the mechanism, the scaling, and a minute-scale (85 s) single block, not the 25-minute figure on this hardware. |
-| That the attack disrupts *peer-to-peer* propagation (relay delay, stale blocks) | That requires a multi-node P2P measurement (0xB10C's signet approach). We measure local validation, CPU, RAM, and RPC latency on one node. |
+| Full peer-to-peer *topology* at scale | We demonstrate single-peer propagation on a small private loopback network (~97 s to a peer, stale tip, blocked RPC); the 0xB10C multi-peer signet topology is not reproduced at scale. |
 | That BIP 54's consensus fix rejects the block | BIP 54 is not yet merged in v31.1.0; we record `bip54_would_reject` as an inference (850k sigops ≫ 2,500) and support a BIP-54 binary via `--bitcoind` for a live test. |
 | The `scriptSig`/P2SH family of poison blocks | We reproduce the `scriptPubKey` family (the demonstrated worst case). |
 

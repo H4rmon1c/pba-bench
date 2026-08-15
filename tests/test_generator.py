@@ -108,6 +108,14 @@ def test_bip54_limit_constant():
     assert BIP54_MAX_TX_LEGACY_SIGOPS == 2500
 
 
+def test_deterministic_time_flag_present():
+    # deterministic_time must be configurable (multi-node runs need real time).
+    cfg = ConstructionConfig(seed=1, num_utxos=4, sigops_per_input=2,
+                             deterministic_time=False)
+    assert cfg.deterministic_time is False
+    assert ConstructionConfig(seed=1).deterministic_time is True
+
+
 # --------------------------------------------------------------------------- #
 # Integration tests (require a local bitcoind)
 # --------------------------------------------------------------------------- #

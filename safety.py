@@ -72,6 +72,25 @@ def is_loopback_ip(ip: str) -> bool:
     return addr.is_loopback
 
 
+def _is_loopback_peer(hostport: str) -> bool:
+    """Return True if ``host:port`` points at a loopback address (host may be bare)."""
+    hostport = hostport.strip()
+    if hostport.startswith("["):          # [::1]:port
+        end = hostport.find("]")
+        if end == -1:
+            return False
+        host = hostport[1:end]
+        return is_loopback_ip(host)
+    if hostport.count(":") == 1:          # host:port (IPv4)
+        host, _, _ = hostport.partition(":")
+        host = host.rstrip()
+        if host in ("localhost", "localhost."):
+            return True
+        return is_loopback_ip(host)
+    # bare IPv6 or bare IPv4 with no port -> require loopback
+    return is_loopback_ip(hostport)
+
+
 def _parse_flag_value(arg: str):
     """Split a bitcoind-style ``-flag`` or ``-flag=value`` into (flag, value).
 
@@ -100,11 +119,27 @@ class SafeConfig:
     extra_args: list = field(default_factory=list)
     keep_datadir: bool = False
     disable_networking: bool = True
+    # Loopback-only P2P peering (used by the multi-node propagation benchmark).
+    # All addresses must resolve to loopback; nothing is ever reachable remotely.
+    p2p_peers: list = field(default_factory=list)       # ["127.0.0.1:<port>", ...]
+    p2p_listen_port: int = 0                            # 0 = do not listen for P2P
+    p2p_bind_host: str = "127.0.0.1"
 
     def build_bitcoind_args(self) -> list:
-        """Return the full, safe ``bitcoind`` argument list."""
+        """Return the full, safe ``bitcoind`` argument list.
+
+        If ``p2p_peers`` or ``p2p_listen_port`` are set, P2P networking is enabled
+        but restricted to loopback addresses only. Otherwise networking is fully
+        disabled.
+        """
         if not is_loopback_ip(self.rpc_host):
             raise SafetyError(f"rpc_host is not loopback: {self.rpc_host!r}")
+        if not is_loopback_ip(self.p2p_bind_host):
+            raise SafetyError(f"p2p_bind_host is not loopback: {self.p2p_bind_host!r}")
+        for peer in self.p2p_peers:
+            if not _is_loopback_peer(peer):
+                raise SafetyError(f"p2p peer is not loopback: {peer!r}")
+
         args = [
             "-regtest",
             f"-datadir={self.datadir}",
@@ -119,15 +154,28 @@ class SafeConfig:
             f"-rpcbind={self.rpc_host}",
             f"-rpcallowip=127.0.0.1",
             f"-rpcallowip=::1",
+            "-dnsseed=0",   # no DNS seeds (and no fixed seeds)
+            "-discover=0",  # no automatic interface discovery
+            "-natpmp=0",    # no port mapping
         ]
-        if self.disable_networking:
-            args += [
-                "-connect=0",   # do not outbound-connect to any peer
-                "-listen=0",    # do not accept inbound P2P connections
-                "-dnsseed=0",   # no DNS seeds (and no fixed seeds)
-                "-discover=0",  # do not auto-discover local interfaces
-                "-natpmp=0",    # no port mapping
-            ]
+
+        peering = bool(self.p2p_peers) or self.p2p_listen_port
+        if not peering:
+            args += ["-connect=0", "-listen=0"]
+        else:
+            if self.p2p_listen_port:
+                args += [
+                    "-listen=1",
+                    f"-bind={self.p2p_bind_host}",
+                    f"-port={self.p2p_listen_port}",
+                ]
+            else:
+                args += ["-listen=0"]
+            for peer in self.p2p_peers:
+                args.append(f"-connect={peer}")
+            if not self.p2p_peers:
+                args.append("-connect=0")
+
         if self.rpc_port:
             args.append(f"-rpcport={self.rpc_port}")
         args += self.extra_args
@@ -255,12 +303,27 @@ class SafetyValidator:
             out.append(arg)
         return out
 
+    # -- p2p peering (loopback only) --------------------------------------- #
+    def validate_p2p_peers(self, peers: list, bind_host: str = "127.0.0.1") -> list:
+        if not is_loopback_ip(bind_host):
+            raise SafetyError(f"p2p_bind_host is not loopback: {bind_host!r}")
+        out = []
+        for peer in peers:
+            if not _is_loopback_peer(str(peer)):
+                raise SafetyError(
+                    f"P2P peer {peer!r} is not a loopback address; refusing. "
+                    "pba-bench only ever peers with its own local regtest nodes."
+                )
+            out.append(str(peer))
+        return out
+
     # -- full validation --------------------------------------------------- #
     def validate(self, cfg: SafeConfig) -> SafeConfig:
         cfg.bitcoind_path = self.validate_bitcoind(cfg.bitcoind_path)
         cfg.rpc_host = self.validate_rpc_host(cfg.rpc_host)
         cfg.datadir = self.prepare_datadir(cfg.datadir)
         cfg.extra_args = self.validate_extra_args(cfg.extra_args)
+        cfg.p2p_peers = self.validate_p2p_peers(cfg.p2p_peers, cfg.p2p_bind_host)
         cfg.limits = {**DEFAULT_LIMITS, **(cfg.limits or {})}
         return cfg
 

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -146,6 +147,9 @@ class ConstructionConfig:
     change_script: str = "op_true"
     max_block_weight: int = MAX_BLOCK_WEIGHT
     max_prep_blocks: int = 0
+    #: Use a seed-derived mocktime for fully deterministic blocks. Disable for
+    #: multi-node runs (setmocktime suppresses new-block relay to peers).
+    deterministic_time: bool = True
 
     def validate(self) -> None:
         if self.num_utxos < 1:
@@ -313,15 +317,26 @@ class PoisonBlockGenerator:
 
     # -- helpers ----------------------------------------------------------- #
     def _init_clock(self):
-        base = 1_700_000_000 + (self.cfg.seed % 1_000_000)
-        self.rpc.setmocktime(base + 100_000)
-        self._clock = base
+        if self.cfg.deterministic_time:
+            # Deterministic wall clock so identical seeds produce identical blocks.
+            base = 1_700_000_000 + (self.cfg.seed % 1_000_000)
+            self.rpc.setmocktime(base + 100_000)
+            self._clock = base
+        else:
+            # Real time: required for multi-node runs (setmocktime suppresses
+            # new-block relay to peers).
+            self._clock = None
 
     def _tmpl(self):
-        self._clock += 1
+        if self.cfg.deterministic_time:
+            self._clock += 1
+            curtime = self._clock
+        else:
+            curtime = max(int(time.time()), (self._clock or 0) + 1)
+            self._clock = curtime
         return {
             "previousblockhash": self.rpc.getbestblockhash(),
-            "curtime": self._clock,
+            "curtime": curtime,
             "height": self.rpc.getblockcount() + 1,
             "version": 4,
         }

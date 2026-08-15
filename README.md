@@ -129,11 +129,32 @@ radius of the single-block attack in current software.
   not public (only high-level figures are). We built the smallest defensible
   reproduction from Bitcoin's consensus behavior and the public test vectors, and we do
   not claim to match Portland's absolute 25-minute number.
-* **It does not demonstrate peer-to-peer propagation consequences** (stale blocks,
-  relay delay, RPC unresponsiveness across a network). That requires a multi-node
-  P2P measurement (the 0xB10C signet approach). We measure local validation, CPU, RAM
-  and RPC latency during validation on a single node.
 * **It does not test against any public network.** See [Safety](#safety).
+
+## Multi-node consequences (the `propagate` demo)
+
+The `propagate` subcommand peers 1–N observer nodes with a miner over **loopback-only
+P2P** and measures the real-world consequences of a poison block, in the style of the
+0xB10C signet study but fully local and harmless:
+
+* **Propagation delay** — how long the poison block takes to reach a peer (vs a normal
+  block). The delay is dominated by the peer's validation time.
+* **RPC blocking on the peer** — lightweight RPC calls issued while the peer validates
+  the poison block are delayed (up to ~the validation time).
+* **Stale tip** — the peer cannot update its tip until it finishes validating, so it
+  keeps working on (mining/extending) the pre-poison tip during validation.
+
+Measured on v31.1.0 (Xeon E5-2680), a single `-par=1` observer:
+
+| | normal block | poison block (N=3000, 300k sigops) |
+|---|---|---|
+| propagation to peer | ~5 ms | **~30 s** |
+| peer RPC blocked (max) | — | ~28 s |
+| peer tip stays stale | ~0 | **~30 s** (until validation completes) |
+
+This demonstrates the network-level blast radius: a poison block stalls a peer's
+validation, blocks its RPC, and keeps it working on a stale tip — the conditions that
+lead to stale blocks and wasted mining work.
 
 ---
 
@@ -160,6 +181,12 @@ python3 -m venv .venv
 # one-command reproduction of the headline result (single-threaded AND parallel),
 # saved under results/reproduce-<timestamp>/ with a printed summary
 ./scripts/reproduce.sh            # or: ./scripts/reproduce.sh /path/to/bitcoind
+
+# multi-node propagation demo: build the poison block on a miner, peer observers
+# over loopback P2P, and measure how long it takes the poison block to reach them
+# and how it blocks their RPC / keeps them on a stale tip.
+.venv/bin/python ./pba_bench.py propagate --bitcoind "$(which bitcoind)" \
+    --num-utxos 3000 --sigops-per-input 100 --observer-par 1 --confirm
 ```
 
 Cross-version comparison: pass a different `--bitcoind` binary (Core 29/30/31, Knots, a
@@ -224,19 +251,22 @@ that the smoke profile produces a valid regtest chain.
 
 ```
 pba-bench/
-├── pba_bench.py          # CLI (benchmark, report)
+├── pba_bench.py          # CLI (benchmark, propagate, report)
 ├── benchmark.py          # controller: launch node, measure, export
+├── propagation.py        # multi-node propagation / consequence demo
 ├── construction.py       # deterministic poison-block generator
 ├── safety.py             # the safety layer (regtest/loopback/disposable only)
 ├── measure.py            # CPU/RSS/RPC-latency sampling during validation
 ├── provenance.py         # node/hardware/build info
 ├── schemas.py            # JSON/CSV result schema
 ├── report.py             # markdown report generator
+├── scripts/reproduce.sh  # one-command headline reproduction
 ├── test_framework/       # vendored unchanged from Bitcoin Core v31.1.0 (MIT)
 ├── configs/safe-defaults.json
 ├── docs/analysis.md      # deep technical analysis, observed vs. Portland
+├── docs/WHAT_THIS_PROVES.md   # precise, honest claim statement
 ├── research/             # curated primary-source notes (BIP 54, PR 35793, gists)
-├── tests/                # safety, generator, results tests
+├── tests/                # safety, generator, results, propagation tests
 ├── results/              # sample JSON/CSV/report results
 ├── BENCHMARKS.md
 └── README.md
