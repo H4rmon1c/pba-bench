@@ -14,8 +14,6 @@ import secrets
 import shutil
 import socket
 import subprocess
-import sys
-import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,13 +22,14 @@ from pathlib import Path
 from test_framework.authproxy import AuthServiceProxy, JSONRPCException
 
 import construction
-from construction import (
-    BIP54_MAX_TX_LEGACY_SIGOPS,
-    ConstructionConfig,
-    PoisonBlockGenerator,
+from construction import ConstructionConfig, PoisonBlockGenerator
+from measure import NodeMonitor, ResourceGuard, timed_rpc
+from provenance import (
+    current_process_affinity,
+    git_commit,
+    host_info,
+    node_binary_info,
 )
-from measure import NodeMonitor, timed_rpc
-from provenance import host_info, node_binary_info, node_rpc_info
 from safety import (
     DEFAULT_LIMITS,
     SafetyError,
@@ -38,7 +37,7 @@ from safety import (
     SafeConfig,
     verify_chain_is_regtest,
 )
-from schemas import RESULT_FIELDS, csv_columns, flat_result
+from schemas import SCHEMA_VERSION, csv_columns, flat_result
 
 # --------------------------------------------------------------------------- #
 # Profiles
@@ -95,6 +94,7 @@ class BenchmarkConfig:
     max_blocks: int = DEFAULT_LIMITS["max_blocks"]
     max_poison_tx_bytes: int = DEFAULT_LIMITS["max_poison_tx_bytes"]
     extra_args: list = field(default_factory=list)
+    cpu_affinity: str | None = None   # e.g. "0" or "0,2"; None = inherit
     # construction overrides
     num_utxos: int | None = None
     sigops_per_input: int | None = None
@@ -173,7 +173,26 @@ class Node:
         self._rpc_probe = AuthServiceProxy(url, timeout=60)
         self.rpc.reuse_http_connections = False
         self._rpc_probe.reuse_http_connections = False
+        self._apply_affinity()
         self._wait_ready()
+
+    def _apply_affinity(self):
+        """Pin this node's process to the configured CPUs (optional)."""
+        if not self.cfg.cpu_affinity:
+            return
+        try:
+            cpus = [int(c) for c in self.cfg.cpu_affinity.split(",") if c.strip() != ""]
+        except ValueError:
+            raise SafetyError(
+                f"invalid --cpu-affinity {self.cfg.cpu_affinity!r}; expected "
+                "comma-separated CPU indices, e.g. '0' or '0,2'"
+            ) from None
+        if not cpus:
+            raise SafetyError("--cpu-affinity must name at least one CPU")
+        try:
+            os.sched_setaffinity(self._proc.pid, cpus)
+        except (AttributeError, OSError) as e:
+            raise SafetyError(f"could not set CPU affinity to {cpus}: {e}") from None
 
     def _wait_ready(self, timeout: float = 120.0):
         deadline = time.time() + timeout
@@ -222,10 +241,24 @@ class Node:
         verify_chain_is_regtest(self.rpc)
 
     def probe_latency(self) -> float:
-        """Return the wall time of one trivial RPC call (for the monitor)."""
+        """Return the wall time of one trivial RPC call (for the monitor).
+
+        Raises on timeout/error so the monitor can classify the sample.
+        """
         t0 = time.perf_counter()
         self._rpc_probe.getblockcount()
         return time.perf_counter() - t0
+
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def terminate(self):
+        """Hard-terminate the node (used by resource-limit enforcement)."""
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -237,10 +270,16 @@ class RunResult(dict):
 
 
 def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
-             cfg: BenchmarkConfig, log) -> RunResult:
+             cfg: BenchmarkConfig, log, command: str = "") -> RunResult:
     gen = PoisonBlockGenerator(node.rpc, gen_cfg, log)
 
     # Baseline: time submission of a normal (empty) block for comparison.
+    # In "warm" mode we additionally submit an extra empty block first, so the
+    # node's caches/threads have done one more block of warmup before the
+    # measured submit. "cold" submits the baseline block and the poison block on
+    # a freshly-started node.
+    if cfg.warm_cold == "warm":
+        _baseline_submit(node)
     baseline_wall = _baseline_submit(node)
 
     log("building poison construction (prep)...")
@@ -262,9 +301,11 @@ def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
         )
 
     log(f"poison tx: {m['poison_tx_vin_count']} inputs, "
+        f"{m['executed_checksig_count']} executed CHECKSIG, "
         f"{m['total_legacy_sigops_bip54']} BIP54 sigops, "
         f"{m['poison_tx_size_bytes']} bytes, weight {m['poison_tx_weight']}")
-    log(f"expected sighash preimage bytes (cache-aware): {m['expected_sighash_preimage_bytes']}")
+    log(f"sighash serialization bytes (v31.1.0, cache-aware): "
+        f"{m['sighash_serialization_bytes']}")
 
     # --- measured submit --------------------------------------------------- #
     block_hex = poison_block.serialize().hex()
@@ -273,8 +314,18 @@ def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
     def do_submit():
         return node.rpc.submitblock(block_hex)
 
+    # ResourceGuard enforces --max-rss-mb / --max-wall-seconds as real limits:
+    # on violation it hard-terminates the disposable node and records why.
+    guard = ResourceGuard(
+        node._proc.pid,
+        max_rss_mb=cfg.max_peak_rss_mb,
+        max_wall_seconds=cfg.max_wall_seconds,
+        on_violation=node.terminate,
+    )
     outcome = {"success": "accepted", "rejection_reason": ""}
-    with NodeMonitor(node._proc.pid, node.probe_latency) as mon:
+    with NodeMonitor(node._proc.pid, node.probe_latency,
+                     probe_timeout=60) as mon:
+        guard.start()
         try:
             rpc_res = do_submit()
             # submitblock returns None on success, or the reject-reason string.
@@ -282,7 +333,6 @@ def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
                 outcome["success"] = "rejected"
                 outcome["rejection_reason"] = str(rpc_res)
         except JSONRPCException as e:
-            rpc_res = e.error
             if isinstance(e.error, dict) and e.error.get("code") == -344:
                 # submitblock RPC timed out: validation is taking longer than the
                 # configured limit. This is itself evidence of the attack.
@@ -294,12 +344,19 @@ def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
         except Exception as e:
             outcome["success"] = "crash"
             outcome["rejection_reason"] = f"{type(e).__name__}: {e}"
+        guard.stop()
     mon_stats = mon.stats()
 
-    # After submit: confirm chain state.
+    # A resource-limit violation takes precedence over whatever the RPC reported.
+    violation = guard.violation()
+    if violation:
+        outcome["success"] = "aborted"
+        outcome["rejection_reason"] = f"resource limit: {violation}"
+
+    # After submit: confirm chain state (only if the node is still alive).
     block_hash, block_meta = "", {}
     try:
-        if outcome["success"] == "accepted":
+        if outcome["success"] == "accepted" and node.alive():
             info = node.rpc.getblockchaininfo()
             block_hash = info.get("bestblockhash", "")
             block_meta = node.rpc.getblock(block_hash, 2)
@@ -312,26 +369,28 @@ def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
         outcome["rejection_reason"] = f"validation exceeded max_wall_seconds={cfg.max_wall_seconds}"
 
     # --- provenance -------------------------------------------------------- #
-    rpc_info = node_rpc_info(node.rpc)
+    rpc_info = _safe_call(node.rpc, "getnetworkinfo", {}) if node.alive() else {}
     bin_info = node_binary_info(cfg.bitcoind_path)
     hw = host_info()
-    net = _safe_call(node.rpc, "getnetworkinfo", {})
-
+    pba_repo = Path(__file__).resolve().parent
     result = RunResult()
     result["run"] = {
+        "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "profile": profile,
+        "command": command,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "seed": gen_cfg.seed,
     }
     result["provenance"] = {
-        "node_version": rpc_info.get("node_version"),
-        "node_subversion": rpc_info.get("node_subversion", ""),
+        "node_version": rpc_info.get("version"),
+        "node_subversion": rpc_info.get("subversion", ""),
         "node_version_string": bin_info["node_version_string"],
         "node_git_commit": bin_info["node_git_commit"],
         "compiler": bin_info["compiler"],
         "build_type": bin_info["build_type"],
         "bitcoind_path": str(cfg.bitcoind_path),
+        "bitcoind_sha256": bin_info["bitcoind_sha256"],
         "kernel": hw["kernel"],
         "os_name": hw["os_name"],
         "machine": hw["machine"],
@@ -341,9 +400,16 @@ def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
         "total_ram_bytes": hw["total_ram_bytes"],
         "validation_threads": cfg.validation_threads,  # 0 = node default (-par)
         "warm_cold": cfg.warm_cold,
+        "cpu_affinity": cfg.cpu_affinity or current_process_affinity(),
+        "pba_bench_commit": git_commit(pba_repo),
     }
     result["construction"] = dict(m)
     result["construction"]["vector"] = cfg.vector
+    try:
+        from vectors import get_vector
+        result["construction"]["vector_metadata"] = get_vector(cfg.vector).as_dict()
+    except Exception:
+        pass
     result["construction"]["poison_block_size_bytes"] = block_meta.get("size", 0) or len(poison_block.serialize())
     result["construction"]["poison_block_weight"] = block_meta.get("weight", 0) or (len(poison_block.serialize()) * 4)
     result["outcome"] = {
@@ -352,12 +418,17 @@ def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
         "block_hash": block_hash,
         "block_height": height,
     }
-    # BIP 54 inference: a supporting build rejects any non-coinbase tx whose
-    # BIP54-accounted legacy sigops exceed 2500. This is an inference from the
-    # measured construction, not a live consensus test (that requires a BIP54
-    # binary supplied via --bitcoind).
+    # BIP 54: distinguish a live rejection (a BIP54 binary actually rejected the
+    # block) from an inference (no such binary was tested).
     bip54_sigops = m.get("total_legacy_sigops_bip54", 0)
-    result["outcome"]["bip54_would_reject"] = bip54_sigops > construction.BIP54_MAX_TX_LEGACY_SIGOPS
+    would = bip54_sigops > construction.BIP54_MAX_TX_LEGACY_SIGOPS
+    if would and outcome["success"] == "rejected" and "legacy-sigops" in outcome["rejection_reason"]:
+        result["outcome"]["bip54_result"] = "live"
+    elif would:
+        result["outcome"]["bip54_result"] = "inferred"
+    else:
+        result["outcome"]["bip54_result"] = "not_tested"
+    result["outcome"]["bip54_would_reject"] = would
     result["measurement"] = {
         "baseline_wall_seconds": baseline_wall,
         "validation_wall_seconds": mon_stats["validation_wall_seconds"],
@@ -366,6 +437,9 @@ def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
         "rpc_probe_count": mon_stats["rpc_probe_count"],
         "rpc_probe_max_seconds": mon_stats["rpc_probe_max_seconds"],
         "rpc_probe_median_seconds": mon_stats["rpc_probe_median_seconds"],
+        "rpc_probe_timeout_count": mon_stats["rpc_probe_timeout_count_exact"],
+        "rpc_probe_error_count": mon_stats["rpc_probe_error_count"],
+        "rpc_probe_lower_bound_seconds": mon_stats["rpc_probe_lower_bound_seconds"],
         "block_tx_count": len(block_meta.get("tx", [])) if block_meta else 0,
     }
     result["limits"] = {
@@ -427,11 +501,25 @@ def export_results(results: list, outdir: Path) -> tuple:
     return json_path, csv_path
 
 
+def required_blocks(gen_cfg: ConstructionConfig) -> int:
+    """Total blocks a construction mines, including the poison block.
+
+    Used to enforce ``--max-blocks`` *before* constructing anything.
+    """
+    from construction import COINBASE_MATURITY, MAX_BLOCK_SIGOPS_COST
+    sigops_per_prep_block = MAX_BLOCK_SIGOPS_COST // 4
+    reserve = 400
+    max_utxos_per_prep_block = max(1, (sigops_per_prep_block - reserve) // gen_cfg.sigops_per_input)
+    n_prep_blocks = (gen_cfg.num_utxos + max_utxos_per_prep_block - 1) // max_utxos_per_prep_block
+    return COINBASE_MATURITY + n_prep_blocks + 1
+
+
 # --------------------------------------------------------------------------- #
 # Main benchmark driver
 # --------------------------------------------------------------------------- #
 
-def run_benchmark(cfg: BenchmarkConfig, workspace: Path, log=None) -> Path:
+def run_benchmark(cfg: BenchmarkConfig, workspace: Path, log=None,
+                  command: str = "") -> Path:
     log = log or (lambda *a: print(*a))
     validator = SafetyValidator(workspace)
     cfg.bitcoind_path = validator.validate_bitcoind(cfg.bitcoind_path)
@@ -448,6 +536,17 @@ def run_benchmark(cfg: BenchmarkConfig, workspace: Path, log=None) -> Path:
     gen_configs = _build_gen_configs(cfg)
     log(f"running {len(gen_configs)} construction config(s) x {cfg.runs} run(s)")
 
+    # Enforce --max-blocks before constructing anything: refuse any config that
+    # would need more blocks than the limit.
+    for g_idx, gen_cfg in enumerate(gen_configs):
+        need = required_blocks(gen_cfg)
+        if need > cfg.max_blocks:
+            raise SafetyError(
+                f"construction (N={gen_cfg.num_utxos}, K={gen_cfg.sigops_per_input}) "
+                f"requires {need} blocks, exceeding max_blocks={cfg.max_blocks}. "
+                "Refusing before constructing."
+            )
+
     for g_idx, gen_cfg in enumerate(gen_configs):
         for run_idx in range(1, cfg.runs + 1):
             rid = f"{run_id}-c{g_idx + 1}-r{run_idx}"
@@ -456,7 +555,7 @@ def run_benchmark(cfg: BenchmarkConfig, workspace: Path, log=None) -> Path:
                 node.start()
                 node.verify_regtest()
                 log(f"[{rid}] datadir={node.datadir}")
-                res = _run_one(node, gen_cfg, rid, cfg.profile, cfg, log)
+                res = _run_one(node, gen_cfg, rid, cfg.profile, cfg, log, command=command)
                 all_results.append(res)
                 # Export incrementally so partial results survive interruption.
                 json_path, csv_path = export_results(all_results, outdir)
@@ -465,6 +564,31 @@ def run_benchmark(cfg: BenchmarkConfig, workspace: Path, log=None) -> Path:
                 node.stop()
 
     json_path, csv_path = export_results(all_results, outdir)
+
+    # Reproducibility manifest.
+    try:
+        from manifest import build_manifest, write_manifest
+        first = all_results[0] if all_results else {}
+        mf = build_manifest(
+            workspace=workspace,
+            bitcoind=cfg.bitcoind_path,
+            command=command,
+            vector=cfg.vector,
+            num_utxos=first.get("construction", {}).get("num_utxos", cfg.num_utxos or 0),
+            sigops_per_input=first.get("construction", {}).get("sigops_per_input",
+                                                               cfg.sigops_per_input or 0),
+            seed=cfg.seed,
+            topology=None,
+            observer_config={"validation_threads": cfg.validation_threads,
+                             "warm_cold": cfg.warm_cold},
+            validation_threads=cfg.validation_threads,
+            node_args=cfg.extra_args,
+            result_files=[json_path, csv_path],
+        )
+        write_manifest(mf, outdir)
+    except Exception as e:  # pragma: no cover - manifest must never break a run
+        log(f"warning: could not write manifest: {e}")
+
     log(f"results written: {json_path}, {csv_path}")
     return outdir
 
@@ -492,7 +616,7 @@ def _build_gen_configs(cfg: BenchmarkConfig) -> list:
 def _print_warning(cfg: BenchmarkConfig) -> None:
     line = "=" * 74
     print("\n" + line)
-    print("pba-bench: Bitcoin Poison Block Attack benchmark (REG TEST ONLY)")
+    print("pba-bench: Bitcoin worst-case block validation benchmark (REG TEST ONLY)")
     print(line)
     print("This tool launches its OWN disposable regtest node, fully isolated:")
     print("  - chain is forced to regtest and verified via getblockchaininfo")

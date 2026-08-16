@@ -151,7 +151,9 @@ def test_fresh_datadir_created(validator, workspace):
     "-dnsseed=1",
     "-proxy=127.0.0.1:9050",
     "-bind=0.0.0.0:8333",
+    "-bind=[2001:db8::1]:8333",      # non-loopback IPv6
     "-rpcbind=0.0.0.0",
+    "-rpcbind=[2001:db8::1]",        # non-loopback IPv6 RPC bind
     "-rpcallowip=0.0.0.0/0",
     "-externalip=8.8.8.8",
     "-listen=1",
@@ -164,6 +166,47 @@ def test_fresh_datadir_created(validator, workspace):
 def test_unsafe_extra_args_rejected(validator, arg):
     with pytest.raises(SafetyError):
         validator.validate_extra_args([arg])
+
+
+@pytest.mark.parametrize("arg", [
+    "-addnode=example.com:8333",     # external DNS name
+    "-addnode=my-node.local:8333",   # LAN hostname
+    "-connect=example.com:8333",
+    "-seednode=seed.bitcoinstats.com",
+    "-proxy=socks5://tor.example:9050",
+])
+def test_external_dns_and_lan_rejected(validator, arg):
+    with pytest.raises(SafetyError):
+        validator.validate_extra_args([arg])
+
+
+def test_argument_injection_rejected(validator):
+    # An attempt to smuggle a second, unsafe flag inside a value is rejected
+    # because the leading flag (-connect) is a network flag.
+    with pytest.raises(SafetyError):
+        validator.validate_extra_args(["-connect=127.0.0.1:8333 -connect=8.8.8.8"])
+    # A network flag with a non-loopback value is rejected regardless of value
+    # formatting.
+    with pytest.raises(SafetyError):
+        validator.validate_extra_args(["-addnode=127.0.0.1:8333 -addnode=8.8.8.8"])
+
+
+def test_non_loopback_ipv6_rpc_rejected(validator):
+    with pytest.raises(SafetyError):
+        validator.validate_rpc_host("2001:db8::1")
+
+
+def test_non_loopback_ipv6_p2p_peer_rejected(workspace):
+    validator = SafetyValidator(workspace)
+    with pytest.raises(SafetyError):
+        validator.validate_p2p_peers(["[2001:db8::1]:8333"])
+
+
+def test_unsafe_managed_flag_rejected(validator):
+    for arg in ["-datadir=/x", "-rpcuser=hacker", "-rpcpassword=secret",
+                "-conf=/etc/bitcoin.conf", "-server=1", "-txindex=1", "-pid=/tmp/x"]:
+        with pytest.raises(SafetyError):
+            validator.validate_extra_args([arg])
 
 
 @pytest.mark.parametrize("arg", [

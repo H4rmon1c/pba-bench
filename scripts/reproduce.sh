@@ -75,14 +75,14 @@ for d in ("par1", "par16"):
     par = r["provenance"]["validation_threads"]
     print(f"  validation threads (-par): {par}")
     print(f"  poison inputs x CHECKSIG : {c['num_utxos']} x {c['sigops_per_input']}")
-    print(f"  BIP-54 sigops            : {c['total_legacy_sigops_bip54']}")
-    print(f"  sighash preimage bytes   : {c['expected_sighash_preimage_bytes']/1e9:.2f} GB")
+    print(f"  executed CHECKSIG        : {c['executed_checksig_count']}")
+    print(f"  sighash serialization MB : {c['sighash_serialization_bytes']/1e6:.1f}")
     print(f"  validation wall time     : {m['validation_wall_seconds']:.1f} s")
     print(f"  validation CPU time      : {m['validation_cpu_seconds']:.1f} s")
     print(f"  peak RSS                 : {m['peak_rss_bytes']/1e6:.0f} MB")
     print(f"  outcome                  : {o['success']}{' (' + o['rejection_reason'] + ')' if o['rejection_reason'] else ''}")
     print("  ------------------------------------------------------------")
-print(f"\n  Node: {json.load(open(glob.glob(out+'/par1/results.json')[0]))[0]['provenance']['node_subversion']}")
+print(f"\n  Node: {json.load(open(glob.glob(out+'/par1/results.json')[0]))[0]['provenance']['node_version_string']}")
 PY
 
 echo

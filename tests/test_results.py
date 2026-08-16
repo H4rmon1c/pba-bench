@@ -7,7 +7,14 @@ import sys
 
 import pytest
 
-from schemas import RESULT_FIELDS, csv_columns, flat_result
+from schemas import (
+    RESULT_FIELDS,
+    SCHEMA_VERSION,
+    csv_columns,
+    flat_result,
+    migrate_v1_result,
+    validate_result,
+)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -46,8 +53,39 @@ def test_csv_columns_are_grouped():
     cols = csv_columns()
     assert "provenance.node_version" in cols
     assert "construction.total_legacy_sigops_bip54" in cols
+    assert "construction.sighash_serialization_bytes" in cols
     assert "measurement.validation_wall_seconds" in cols
+    assert "measurement.rpc_probe_timeout_count" in cols
     assert "outcome.rejection_reason" in cols
+
+
+def test_schema_version_present():
+    assert SCHEMA_VERSION == "2.0.0"
+
+
+def test_deprecated_v1_fields_are_aliased():
+    # The v1 cache-aware preimage bytes map to the v2 serialization bytes.
+    v1 = {
+        "run": {},
+        "construction": {"expected_sighash_preimage_bytes": 5050,
+                         "theoretical_sighash_preimage_bytes_no_cache": 10100},
+        "outcome": {}, "measurement": {}, "provenance": {}, "limits": {},
+    }
+    migrated = migrate_v1_result(v1)
+    assert migrated["construction"]["sighash_serialization_bytes"] == 5050
+    assert migrated["construction"]["no_cache_sighash_serialization_bytes"] == 10100
+    assert migrated["run"]["schema_version"] == "1.0.0"
+
+
+def test_validate_result_ok_for_wellformed():
+    result = _sample_result()
+    assert validate_result(result) == []
+
+
+def test_validate_result_flags_missing_vector():
+    result = _sample_result()
+    result["construction"].pop("vector", None)
+    assert any("construction.vector" in p for p in validate_result(result))
 
 
 def test_export_roundtrip(tmp_path):

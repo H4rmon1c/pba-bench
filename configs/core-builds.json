@@ -1,0 +1,19 @@
+{
+  "//": "Example cross-version comparison manifest for `pba_bench.py compare --manifest`.",
+  "//": "Point each path at a real bitcoind binary and adjust N/K to a size that is",
+  "//": "feasible on your machine. The same deterministic construction runs against",
+  "//": "every binary and is compared in a matrix.",
+  "vector": "scriptpubkey",
+  "num_utxos": 3000,
+  "sigops_per_input": 100,
+  "seed": 1,
+  "validation_threads": 1,
+  "outdir": "results/compare-core-matrix",
+  "binaries": [
+    { "name": "Core 29",  "path": "/opt/core29/bitcoind" },
+    { "name": "Core 30",  "path": "/opt/core30/bitcoind" },
+    { "name": "Core 31",  "path": "/opt/core31/bitcoind" },
+    { "name": "master",   "path": "/opt/core-master/bitcoind" },
+    { "name": "BIP54",    "path": "/opt/core-bip54/bitcoind" }
+  ]
+}

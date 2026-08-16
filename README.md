@@ -1,84 +1,75 @@
-# pba-bench — a safe, reproducible Bitcoin **Poison Block Attack** benchmark
+# pba-bench — a safe, reproducible Bitcoin worst-case block validation and propagation benchmark suite
 
-A deterministic, **regtest-only** tool that builds a *poison block* — a consensus-valid
-Bitcoin block that is pathologically slow to validate — submits it to its own freshly
-launched, fully isolated `bitcoind`, and measures the damage.
+A deterministic, **regtest-only**, **loopback-only** research harness for measuring
+and understanding *worst-case (pathological) block validation* in Bitcoin. It
+builds consensus-valid blocks that are pathologically slow to validate, measures
+them against real `bitcoind` binaries, compares how different node versions and
+mitigations (e.g. BIP 54 / Consensus Cleanup) treat them, and measures how
+validation delay propagates across controlled local networks.
 
-It reproduces the mechanism, the scaling law, and a **minute-scale validation time on a
-single consensus-valid block** (85 s single-threaded, 850,000 signature operations),
-and it documents exactly which consensus limits bound the attack.
+This is not an attack tool and not a demo aimed at scaring people. It exists to
+give Core developers, protocol researchers, BIP authors, node implementers, and
+performance/security researchers **exact, reproducible constructions, defensible
+measurements, cross-version and cross-mitigation comparisons, and raw evidence**
+for protocol discussion.
 
-> A *poison block* (PBA / worst-case validation attack) is a block that is fully valid
-> under Bitcoin's consensus rules but engineered so that validating it takes far longer
-> than an ordinary block. This is a **classical algorithmic-complexity issue in legacy
-> (pre-SegWit) signature hashing** — it is *not* a quantum attack.
-
----
-
-## TL;DR — what exactly this proves
-
-**It proves that Bitcoin's current consensus rules admit blocks whose validation is
-pathologically expensive, and it measures how expensive.**
-
-1. **Existence.** We construct and submit a block that Bitcoin Core **accepts as
-   consensus-valid** yet takes **85 seconds to validate single-threaded** (a normal
-   block takes ~1 ms — roughly a **85,000× slowdown**).
-2. **The mechanism.** The block exploits legacy signature hashing, where every
-   `CHECKSIG` re-hashes the *entire transaction*. A transaction with many inputs each
-   executing many signature checks forces `O(N²·K)` hashing work.
-3. **The scaling law.** We measure total hashed bytes growing quadratically in the
-   number of inputs, and wall/CPU time growing superlinearly.
-
-**It does *not* prove** (and we are explicit about this — see
-[What it does not prove](#what-it-does-not-prove)):
-- that the attack reaches Portland HODL's ~25-minute worst case on this hardware
-  (three consensus limits cap a single block; see [Consensus constraints](#consensus-constraints)),
-- that it can be triggered against a public network (it is regtest-only by design),
-- that it disrupts block *propagation* between peers (that needs a multi-node setup).
+> A *worst-case validation block* is a block that is fully valid under Bitcoin's
+> consensus rules but engineered so that validating it takes far longer than an
+> ordinary block. This is a **classical algorithmic-complexity issue in legacy
+> (pre-SegWit) signature hashing and signature verification** — it is *not* a
+> quantum attack.
 
 ---
 
-## Headline result
+## Safety model (unchanged and enforced)
 
-Measured on Bitcoin Core **v31.1.0**, Intel Xeon E5-2680 (16 physical / 32 logical
-cores), regtest:
+pba-bench **cannot** reach a public network. The safety layer (`safety.py`) is
+the project's strongest feature and is enforced in code, not just documented:
 
-| Case | Poison inputs (N) | CHECKSIG/input (K) | BIP-54 sigops | Sighash preimage | Wall | CPU | Outcome |
-|---|---|---|---|---|---|---|---|
-| `small` | 500 | 6 | 3,000 | 0.01 GB | 0.036 s | 0.44 s | accepted |
-| demo | 3,000 | 100 | 300,000 | 0.38 GB | 2.2 s | 32.5 s | accepted |
-| **demo, `-par=1`** | **8,500** | **100** | **850,000** | **2.99 GB** | **85.1 s** | **85.1 s** | **accepted** |
+* Chain forced to `-regtest` and verified at runtime via
+  `getblockchaininfo.chain == "regtest"` (abort otherwise).
+* RPC binds to loopback only; non-loopback hosts/IPv6 are refused.
+* Fresh disposable datadir per run; existing datadirs, reused datadirs, and
+  symlink escapes are refused.
+* P2P networking is fully disabled by default (`-connect=0 -listen=0
+  -dnsseed=0 -discover=0`). When the multi-node topology mode is used, P2P is
+  enabled **only** over loopback addresses between disposable local regtest
+  nodes.
+* No DNS seeds, no peer discovery, no Tor/I2P/LAN/public peers, no public-network
+  mode.
+* `bitcoind` extra args are filtered; managed flags (`-datadir`, `-conf`,
+  `-rpcuser`, …) and network flags are rejected.
+* Hard resource limits (`--max-wall-seconds`, `--max-rss-mb`, `--max-blocks`,
+  `--max-poison-tx-bytes`) are enforced, not merely recorded (see
+  [Resource limits](#resource-limits)).
+* `--confirm` is required for large/custom/propagation cases.
 
-The `-par=1` case runs a single script-validation thread, which is what a weak or
-single-core node sees; the same block validates in 6.2 s wall time on 16 parallel
-cores while saturating ~94 s of CPU. Full results are in
-[BENCHMARKS.md](BENCHMARKS.md) and under `results/`.
-
----
-
-## Why regtest is a valid proof (network-independence)
-
-Block validity is decided by consensus rules applied **locally** on each node. There is
-no network oracle in block validation. Regtest uses the **identical consensus code**
-(script interpreter, legacy sighash, sigop counting) as mainnet — the only differences
-are chain parameters (difficulty, block spacing), which are irrelevant here. Therefore:
-
-> A block that is consensus-valid on regtest is consensus-valid on mainnet.
-
-The *poison* property (slow to validate) is a property of the validation algorithm, so
-it is also network-independent. Running this against a public testnet would not make the
-finding "more real" — it would only add propagation-consequence measurements at the cost
-of CPU-saturating third-party nodes, which we deliberately do not do (see
-[Safety](#safety) and [Security model](#security-model)).
+There is deliberately **no** way to enable a public-network mode.
 
 ---
 
-## The construction (technical)
+## What this measures, and the honest distinction between claim types
 
-Two stages:
+This project separates **directly measured**, **derived/calculated**, and
+**inferred** claims. They are never mixed.
 
-1. **Preparation.** We spend coinbases to create UTXOs whose *bare* `scriptPubKey` is
-   a chain of `CHECKSIG`/`CHECKSIGVERIFY` ops that one signature satisfies:
+| Type | Example |
+|---|---|
+| **Directly measured** | this block was accepted; validation took X seconds; observer Y reached the new tip after Z seconds; RPC max latency was W seconds |
+| **Derived/calculated** | theoretical legacy-sighash serialization bytes; executed CHECKSIG count; BIP-54 sigop count |
+| **Inferred** | a mitigation "would reject" the block when no supporting binary was actually tested |
+| **External claim** | Portland HODL reported approximately N minutes |
+
+Results and reports label every quantity with its type.
+
+---
+
+## The technical model (corrected)
+
+The construction (the *scriptPubKey* vector, `vectors/scriptpubkey.py`) is:
+
+1. **Preparation.** We spend coinbases to create UTXOs whose bare `scriptPubKey`
+   is a chain of `CHECKSIG`/`CHECKSIGVERIFY` ops that one signature satisfies:
 
    ```
    OP_DUP <pub> OP_CHECKSIGVERIFY  OP_DUP <pub> OP_CHECKSIGVERIFY  ...  <pub> OP_CHECKSIG
@@ -86,193 +77,250 @@ Two stages:
 
    with `scriptSig = <sig>`. There are `K` signature checks per UTXO.
 
-2. **Poison transaction.** A single transaction spends `N` such UTXOs. To validate
-   input *i*, the interpreter runs its `scriptPubKey`, and **every one of the K
-   `CHECKSIG` ops** computes a legacy signature hash: it hashes the entire transaction
-   (all `N` inputs) with only input *i*'s scriptSig replaced by the spent
-   `scriptPubKey` as `scriptCode`. So validation does `N·K` hashes of an `O(N)`-sized
-   preimage — roughly **`O(N²·K)` hashing work**.
+2. **Poison transaction.** A single transaction spends `N` such UTXOs. Each input
+   pays the *same* signature (via `OP_DUP`).
 
-Key details we verified against the source:
-- **The sighash cache does not save you.** Bitcoin Core's per-input sighash cache
-  skips the *serialization* on repeated `CHECKSIG`s, and the signature cache skips
-  repeated *ECDSA math*, but **every `CHECKSIG` still re-hashes the full preimage**
-  (`HashWriter::GetHash()` is not cached). The expensive part is not removed.
-- The poison transaction's own inputs contain only signature pushes (no `CHECKSIG`
-  opcodes), so the poison *block* stays under the per-block sigop limit — it is
-  consensus-valid.
+The **corrected** cost model for validating this block on Bitcoin Core v31.1.0
+(verified against source and by measurement — see
+[research/TECHNICAL_CORRECTIONS.md](research/TECHNICAL_CORRECTIONS.md)):
 
----
+* **Legacy sighash serialization + double-SHA-256: `O(N²)`, independent of `K`.**
+  Bitcoin Core's per-input `SigHashCache` (interpreter.cpp) caches the SHA-256
+  midstate keyed by `(hashType, scriptCode)` for each input. The `K-1` repeated
+  identical `CHECKSIG`s *within one input* reuse that midstate and do **not**
+  re-serialize or re-hash the transaction. Each of the `N` inputs serializes and
+  hashes its `O(N)`-sized preimage **once**.
 
-## Consensus constraints (why the attack is bounded — an original finding)
+* **ECDSA signature verification: `O(N·K)`, one fresh verify per `CHECKSIG`.**
+  During actual block connection the signature cache is *consulted but not
+  populated* (`validation.cpp:2584`), so every `CHECKSIG` performs a fresh ECDSA
+  verification (~60–90 µs each on the benchmark hardware).
 
-While calibrating the benchmark we verified three consensus limits that cap how
-expensive a **single** poison block can be in current Core:
+* **Script interpreter stack/loop overhead: `O(N·K)`, but cheap.**
 
-| Limit | Value | Effect |
-|---|---|---|
-| `MAX_SCRIPT_SIZE` | 10,000 bytes | An output script over 10 KB is treated as *unspendable* and **not stored in the UTXO set** — caps the spent `scriptCode` size. |
-| `MAX_OPS_PER_SCRIPT` | 201 ops | The scriptSig + scriptPubKey may execute at most 201 non-push ops — caps `K` to ~100 for our construction. |
-| Block weight | 4,000,000 | Caps the number of poison inputs `N` to ~8,500. |
+So the empirical validation cost is approximately
+`O(N²)  (serialization+hashing)  +  O(N·K)  (ECDSA)`. The old headline
+`O(N²·K)` described a hypothetical implementation *without* the per-input
+midstate cache; it does **not** describe what v31.1.0 hashes during block
+validation. The project keeps the no-cache quantity as a clearly-labelled
+*hypothetical* counter.
 
-Together these cap a single block at ~850k sigops ≈ **85 s single-threaded** on this
-hardware. Reaching Portland's 25-minute figure would require a *chain* of such blocks,
-slower hardware (e.g. a Raspberry Pi), or a construction that defeats the sighash cache
-more aggressively. This is an honest, useful result: it bounds the real-world blast
-radius of the single-block attack in current software.
+### `MAX_OPS_PER_SCRIPT` (201) is a per-script budget
 
----
-
-## What it does not prove
-
-* **It is not a byte-for-byte reproduction of Portland's demo.** The exact generator is
-  not public (only high-level figures are). We built the smallest defensible
-  reproduction from Bitcoin's consensus behavior and the public test vectors, and we do
-  not claim to match Portland's absolute 25-minute number.
-* **It does not test against any public network.** See [Safety](#safety).
-
-## Multi-node consequences (the `propagate` demo)
-
-The `propagate` subcommand peers 1–N observer nodes with a miner over **loopback-only
-P2P** and measures the real-world consequences of a poison block, in the style of the
-0xB10C signet study but fully local and harmless:
-
-* **Propagation delay** — how long the poison block takes to reach a peer (vs a normal
-  block). The delay is dominated by the peer's validation time.
-* **RPC blocking on the peer** — lightweight RPC calls issued while the peer validates
-  the poison block are delayed (up to ~the validation time).
-* **Stale tip** — the peer cannot update its tip until it finishes validating, so it
-  keeps working on (mining/extending) the pre-poison tip during validation.
-
-Measured on v31.1.0 (Xeon E5-2680), a single `-par=1` observer:
-
-| | normal block | poison block (N=3000, 300k sigops) |
-|---|---|---|
-| propagation to peer | ~5 ms | **~30 s** |
-| peer RPC blocked (max) | — | ~28 s |
-| peer tip stays stale | ~0 | **~30 s** (until validation completes) |
-
-This demonstrates the network-level blast radius: a poison block stalls a peer's
-validation, blocks its RPC, and keeps it working on a stale tip — the conditions that
-lead to stale blocks and wasted mining work.
+Bitcoin Core evaluates `scriptSig` and `scriptPubKey` in **two separate
+`EvalScript` calls**, each with its own 201 non-push-op budget
+(interpreter.cpp). It is **not** a combined scriptSig + scriptPubKey budget.
+For this construction the `scriptPubKey` alone contributes `2K-1` non-push ops,
+so `K ≤ 101`.
 
 ---
 
-## Quick start
+## Commands
 
 ```bash
-cd pba-bench
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt   # psutil, coincurve
+# single-node validation benchmark
+./pba_bench.py benchmark --bitcoind /opt/core31/bin/bitcoind --profile small --runs 3
 
-# smoke: verifies construction + acceptance in a few seconds
-.venv/bin/python ./pba_bench.py benchmark --bitcoind "$(which bitcoind)" --profile smoke
+# empirical scaling: sweep K at fixed N (answer: what does K cost after SigHashCache?)
+./pba_bench.py sweep --bitcoind /opt/core31/bin/bitcoind --axis k \
+    --fixed 2000 --values 1,2,5,10,25,50,75,100 --runs 3
 
-# small: measurable, low-impact (no confirmation)
-.venv/bin/python ./pba_bench.py benchmark --bitcoind "$(which bitcoind)" --profile small --runs 3
+# empirical scaling: sweep N at fixed K
+./pba_bench.py sweep --bitcoind /opt/core31/bin/bitcoind --axis n \
+    --fixed 10 --values 500,1000,2000 --runs 3
 
-# large demonstration: a consensus-valid block that takes ~85 s single-threaded
-.venv/bin/python ./pba_bench.py benchmark --bitcoind "$(which bitcoind)" \
-    --profile custom --num-utxos 8500 --sigops-per-input 100 --par 1 --confirm
+# five actually-independently-measured observers (star)
+./pba_bench.py propagate --bitcoind /opt/core31/bin/bitcoind \
+    --observers 5 --observer-par 1 --topology star --num-utxos 3000 \
+    --sigops-per-input 100 --confirm
 
-# generate a markdown report from a results dir
-.venv/bin/python ./pba_bench.py report results/demo-8500x100-par1/results.json
+# the same block observed by heterogeneous nodes (par 1,2,4,8,default)
+./pba_bench.py propagate --bitcoind /opt/core31/bin/bitcoind \
+    --observer-par 1,2,4,8,0 --topology star --confirm
 
-# one-command reproduction of the headline result (single-threaded AND parallel),
-# saved under results/reproduce-<timestamp>/ with a printed summary
-./scripts/reproduce.sh            # or: ./scripts/reproduce.sh /path/to/bitcoind
+# multi-hop line topology
+./pba_bench.py propagate --bitcoind /opt/core31/bin/bitcoind \
+    --topology line --observers 8 --observer-par 1 --confirm
 
-# multi-node propagation demo: build the poison block on a miner, peer observers
-# over loopback P2P, and measure how long it takes the poison block to reach them
-# and how it blocks their RPC / keeps them on a stale tip.
-.venv/bin/python ./pba_bench.py propagate --bitcoind "$(which bitcoind)" \
-    --num-utxos 3000 --sigops-per-input 100 --observer-par 1 --confirm
+# BIP 54 A/B: the same deterministic construction against vanilla vs a Consensus
+# Cleanup build
+./pba_bench.py compare --vanilla /opt/core31/bin/bitcoind \
+    --bip54 /opt/core-bip54/bin/bitcoind --num-utxos 3000 --sigops-per-input 100
+
+# cross-version matrix from a manifest
+./pba_bench.py compare --manifest configs/core-builds.json
+
+# validate an externally-contributed result file
+./pba_bench.py validate results/core-31/small-x3/results.json
+
+# render a markdown report from any results file
+./pba_bench.py report results/benchmark-.../results.json
 ```
 
-Cross-version comparison: pass a different `--bitcoind` binary (Core 29/30/31, Knots, a
-BIP-54 build). Node version, subversion, CPU, RAM and kernel are recorded in every result.
+Every run writes `results.json` + `results.csv` + `manifest.json` (and a
+`report.md` for propagation runs) into a timestamped subdirectory of
+`--outdir`. The result schema is versioned (`schemas.SCHEMA_VERSION`, currently
+`2.0.0`).
 
 ---
 
-## Profiles
+## Single-node benchmark
 
-| profile | N | K | total sigops | needs `--confirm` |
+`benchmark` launches a fresh, isolated regtest `bitcoind`, builds the
+deterministic poison construction, and measures the blocking `submitblock` call.
+
+Per run it records: `submitblock` wall time, process CPU time, peak RSS,
+RPC latency during validation (with timeout/error counts — censored samples are
+recorded, never silently dropped), block size/weight, executed CHECKSIG count,
+ECDSA-verify count, legacy-sighash serialization bytes (cache-aware) and the
+hypothetical no-cache counter, the outcome (accepted / rejected / timeout /
+crash / aborted) with the exact reason, and full provenance (node version &
+subversion, binary SHA-256, git commits, CPU, RAM, kernel, governor, affinity,
+`-par`, seed, exact command).
+
+Profiles:
+
+| profile | N | K | total CHECKSIG | needs `--confirm` |
 |---|---|---|---|---|
 | `smoke` | 10 | 2 | 20 | no |
 | `small` | 500 | 6 | 3,000 | no |
 | `medium` | 2,500 | 4 | 10,000 | yes |
 | `custom` | user | user | user | yes |
 
-No full-strength case is the default. `medium`/`custom` require `--confirm`. Hard limits
-(`--max-wall-seconds`, `--max-rss-mb`, `--max-blocks`, `--max-poison-tx-bytes`) abort a
-run that would exceed them.
+---
+
+## Propagation / network-consequence experiments
+
+`propagate` builds the poison block on a **miner** node and measures how a
+controlled, loopback-only topology of **observer** nodes experiences it. Every
+observer gets an *independent* measurement context: its own probe thread and RPC
+connection, per-observer tip-transition timing, RPC latency, CPU, peak RSS, and
+topology position. Observers may run different `-par` values, so one identical
+block is observed by heterogeneous nodes.
+
+Topologies (all loopback-only, among disposable local regtest nodes):
+
+* `star` : `MINER -- every observer` (direct).
+* `line` : `MINER -> A -> B -> C -> ...` — measures whether end-to-end delay
+  compounds across validation hops.
+* `tree` : a balanced binary tree rooted at `MINER`.
+
+### Measurement terminology
+
+* `time_to_tip_seconds` — miner `submitblock` → observer's active tip becomes the
+  poison block. Includes P2P transmission, the observer's validation, and tip
+  activation. **Not** pure wire propagation.
+* `miner_validation_seconds` — the miner's own `submitblock` wall time.
+* `post_miner_time_to_tip_seconds` — `time_to_tip` minus the miner's validation.
+
+The reports distinguish miner validation, P2P announcement/transmission,
+observer reconstruction/request behavior, observer validation, and the active-tip
+transition, and they do **not** claim to isolate pure wire transmission without
+P2P instrumentation. A defensible subset of P2P event instrumentation (parsing
+the observer debug logs for `received block` and `UpdateTip` events) is
+included; see `docs/analysis.md` for its limitations.
 
 ---
 
-## What is measured
+## Cross-binary comparison (BIP 54 and cross-version)
 
-Per run: `submitblock` wall time, process CPU time, peak RSS, RPC latency during
-validation, block size/weight, tx/input count, BIP-54 sigop count, expected sighash
-preimage bytes (cache-aware and theoretical no-cache), and the outcome
-(accepted / rejected / timeout / crash) with the exact rejection reason. Provenance:
-node version & subversion, git commit (if available), CPU, RAM, kernel, config, and the
-deterministic seed. Every run is written to both `results.json` and `results.csv`
-incrementally; `--runs N` and the `report` subcommand give median/min/max.
+`compare` runs one *identical, deterministic* construction against multiple
+`bitcoind` binaries and emits a comparable matrix with full provenance (path,
+SHA-256, `--version`, RPC subversion, git commit when available).
 
-## Safety & security model
+* `compare --vanilla PATH --bip54 PATH` — the BIP 54 A/B workflow (vanilla vs a
+  Consensus Cleanup build). A rejection is reported as **`live`** only when the
+  supplied BIP54 binary actually rejects the block with
+  `bad-txns-legacy-sigops`; otherwise it is marked **`inferred`**.
+* `compare --manifest core-builds.json` — an arbitrary cross-version matrix
+  (e.g. Core 29/30/31/master/BIP54), for spotting performance regressions.
 
-Enforced in code (`safety.py`), not just documented:
+The same construction runs against every binary in the matrix. `configs/core-builds.json`
+is a template.
 
-* Chain forced to `-regtest` and verified via `getblockchaininfo.chain == "regtest"`.
-* RPC binds to loopback only; non-loopback hosts are refused.
-* Fresh disposable datadir per run; existing datadirs and symlink escapes are refused.
-* P2P networking fully disabled (`-connect=0 -listen=0 -dnsseed=0 -discover=0`).
-* No DNS seeds, no peer discovery, no outbound/inbound P2P, no public-network mode.
-* `bitcoind` extra args are filtered; `--confirm` required for large/custom cases.
-* A prominent warning and the resolved datadir are printed before every run.
+---
 
-The tool always launches **its own** `bitcoind` with a throwaway regtest datadir. It
-never connects to an existing node, never reuses a datadir, and never broadcasts to a
-public network. There is no "public network" deployment mode. See
-[Security model](docs/analysis.md#security-model).
+## Resource limits (real, not decorative)
+
+| Option | Behavior |
+|---|---|
+| `--max-wall-seconds` | aborts the run and reports `timeout` if a single validation exceeds it |
+| `--max-rss-mb` | a watchdog hard-terminates the disposable node if its RSS exceeds this; the run is recorded as `aborted` with the reason |
+| `--max-blocks` | refuses to construct (before building anything) a case that would mine more blocks than this |
+| `--max-poison-tx-bytes` | refuses a poison transaction larger than this |
+
+`--cpu-affinity 0,2` optionally pins each node to specific CPUs; the affinity is
+recorded in provenance. `--warm-cold warm` submits an extra warmup block before
+the measured block; `cold` is a freshly-started node. All runs are on a warmed
+node in practice because the construction itself mines 100+ prep blocks first.
+
+---
+
+## What this does / does not prove
+
+**It proves** (directly measured): Bitcoin Core's current consensus rules admit
+blocks whose validation is pathologically expensive, and the project builds,
+submits, and measures such blocks; and it quantifies the cost model
+(`O(N²)` serialization+hashing + `O(N·K)` ECDSA) and how the same block
+experiences heterogeneous local peers and moves across controlled topologies.
+
+**It does not prove**:
+* a byte-for-byte reproduction of Portland HODL's worst case (the exact
+  generator is not public);
+* that any *public* network is disrupted (regtest-only by design);
+* a live BIP 54 rejection unless a real BIP 54 binary was tested.
+
+See [docs/WHAT_THIS_PROVES.md](docs/WHAT_THIS_PROVES.md) for the precise claim
+statement.
+
+---
 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 65 tests
+.venv/bin/python -m pytest tests/ -q          # 125+ tests
 ```
 
-Covers the safety controls (mainnet/testnet/signet rejected, non-loopback RPC rejected,
-existing-datadir / symlink-escape rejected, unsafe extra args rejected, cleanup stays in
-the workspace), generator determinism and sigop accounting, preimage correctness, and
-that the smoke profile produces a valid regtest chain.
+Covers: the safety controls (mainnet/testnet/signet/testnet4 rejected,
+non-loopback RPC and IPv6 rejected, external DNS / LAN peers rejected, existing
+datadir / symlink-escape rejected, unsafe and injected extra args rejected,
+cleanup stays in the workspace), generator determinism, sigop accounting, the
+corrected cost-model metrics, topology generation, percentile/statistic
+calculations, timeout/censored RPC samples, resource-limit enforcement, the
+result schema and v1 migration, and tiny integration runs (multi-observer star,
+line and tree topologies, heterogeneous `-par`, clean shutdown).
+
+CI runs the pure unit/safety suite on every push; the heavy bitcoind integration
+smoke is opt-in.
 
 ## Repository layout
 
 ```
 pba-bench/
-├── pba_bench.py          # CLI (benchmark, propagate, report)
-├── benchmark.py          # controller: launch node, measure, export
-├── propagation.py        # multi-node propagation / consequence demo
-├── construction.py       # deterministic poison-block generator
+├── pba_bench.py          # CLI (benchmark, sweep, propagate, compare, report, validate)
+├── benchmark.py          # single-node controller, resource limits, export, manifest
+├── propagation.py        # multi-observer, heterogeneous, topologies (star/line/tree)
+├── sweep.py              # N/K scaling sweeps with per-point aggregates
+├── compare.py            # cross-binary / BIP54 comparison matrix
+├── construction.py       # deterministic poison-block generator + corrected cost metrics
+├── vectors/              # vector plugin registry (scriptpubkey implemented; scriptsig documented)
 ├── safety.py             # the safety layer (regtest/loopback/disposable only)
-├── measure.py            # CPU/RSS/RPC-latency sampling during validation
-├── provenance.py         # node/hardware/build info
-├── schemas.py            # JSON/CSV result schema
-├── report.py             # markdown report generator
+├── measure.py            # CPU/RSS/RPC sampling, RPC censoring, resource guard
+├── provenance.py         # node/hardware/tool provenance, binary SHA-256
+├── schemas.py            # versioned JSON/CSV result schema + v1 migration
+├── manifest.py           # reproducibility manifest
+├── report.py             # research markdown reports (benchmark/sweep/compare/propagation)
 ├── scripts/reproduce.sh  # one-command headline reproduction
+├── configs/core-builds.json   # cross-version comparison manifest template
 ├── test_framework/       # vendored unchanged from Bitcoin Core v31.1.0 (MIT)
-├── configs/safe-defaults.json
-├── docs/analysis.md      # deep technical analysis, observed vs. Portland
-├── docs/WHAT_THIS_PROVES.md   # precise, honest claim statement
-├── research/             # curated primary-source notes (BIP 54, PR 35793, gists)
-├── tests/                # safety, generator, results, propagation tests
-├── results/              # sample JSON/CSV/report results
-├── BENCHMARKS.md
-└── README.md
+├── docs/                 # analysis, precise claim statement
+├── research/             # primary-source notes + TECHNICAL_CORRECTIONS.md
+├── tests/                # unit, safety, and tiny integration tests
+├── results/              # results + contribution guide
+└── .github/workflows/ci.yml
 ```
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The vendored `test_framework/` is MIT-licensed Bitcoin
-Core code, vendored unchanged.
+MIT — see [LICENSE](LICENSE). The vendored `test_framework/` is MIT-licensed
+Bitcoin Core code, vendored unchanged.

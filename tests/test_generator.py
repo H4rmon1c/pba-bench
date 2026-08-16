@@ -186,6 +186,63 @@ def test_poison_tx_reported_sigops_match():
     try:
         assert res.metrics["total_legacy_sigops_bip54"] == 8
         assert res.metrics["poison_tx_vin_count"] == 4
-        assert res.metrics["expected_sighash_preimage_bytes"] > 0
+        assert res.metrics["sighash_serialization_bytes"] > 0
     finally:
         node.stop()
+
+
+def test_metrics_cost_model_relationships():
+    """The corrected v2 cost model: no-cache = K * cache-aware serialization;
+    ECDSA verifies = executed CHECKSIG = N*K."""
+    from construction import ConstructionConfig, PoisonBlockGenerator
+    from test_framework.script import CScript, OP_1, SIGHASH_ALL, LegacySignatureMsg
+    from test_framework.messages import CTransaction, CTxIn, CTxOut, COutPoint
+    from construction import build_legacy_preimages
+
+    cfg = ConstructionConfig(seed=2, num_utxos=5, sigops_per_input=3)
+    g = PoisonBlockGenerator(_NullRPC(), cfg)
+    tx = CTransaction()
+    for i in range(5):
+        tx.vin.append(CTxIn(COutPoint(i + 1, 0)))
+    tx.vout.append(CTxOut(500000, CScript([OP_1])))
+    script_codes = [g.poison_spk] * 5
+    preimages, _ = build_legacy_preimages(tx, script_codes)
+    N, K = 5, 3
+    serialized = sum(len(p) for p in preimages)
+    assert serialized == cfg.num_utxos * len(preimages[0])  # O(N) per input
+    g._preimage_sizes = [len(p) for p in preimages]  # normally set during _build_poison_tx
+    m = g._metrics(tx, 1)
+    assert m["executed_checksig_count"] == N * K
+    assert m["ecdsa_verify_count"] == N * K
+    assert m["sighash_serialization_bytes"] == serialized
+    assert m["sighash_double_sha256_bytes"] == 2 * serialized
+    # no-cache is Kx the cache-aware serialization (hypothetical).
+    assert m["no_cache_sighash_serialization_bytes"] == K * serialized
+    # deprecated aliases point at the actual values.
+    assert m["expected_sighash_preimage_bytes"] == serialized
+    assert m["theoretical_sighash_preimage_bytes_no_cache"] == K * serialized
+
+
+def test_metrics_serialization_independent_of_k():
+    """Serialization bytes must be ~independent of K (SigHashCache model)."""
+    from construction import ConstructionConfig, PoisonBlockGenerator
+    from test_framework.script import CScript, OP_1
+    from test_framework.messages import CTransaction, CTxIn, CTxOut, COutPoint
+    from construction import build_legacy_preimages
+
+    def serial(N, K):
+        cfg = ConstructionConfig(seed=2, num_utxos=N, sigops_per_input=K)
+        g = PoisonBlockGenerator(_NullRPC(), cfg)
+        tx = CTransaction()
+        for i in range(N):
+            tx.vin.append(CTxIn(COutPoint(i + 1, 0)))
+        tx.vout.append(CTxOut(N * 100000, CScript([OP_1])))
+        preimages, _ = build_legacy_preimages(tx, [g.poison_spk] * N)
+        return sum(len(p) for p in preimages)
+
+    # Same N, very different K. Serialization is O(N^2) dominated (each input
+    # serializes the full N-input tx once); the scriptCode only adds its own
+    # ~K-byte size. So raising K 40x must NOT raise serialization ~40x.
+    a = serial(100, 1)
+    b = serial(100, 40)
+    assert b < a * 3, f"K raised serialization too much: {a} -> {b}"

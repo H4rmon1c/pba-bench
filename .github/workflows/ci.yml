@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-and-unit:
+    name: Lint + unit + safety tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Compile all modules (syntax check)
+        run: |
+          python -m py_compile pba_bench.py benchmark.py construction.py measure.py \
+            propagation.py safety.py schemas.py report.py provenance.py sweep.py \
+            compare.py manifest.py
+          python -m compileall -q vectors/
+      - name: Unit + safety tests (no bitcoind needed)
+        run: |
+          # Exclude the integration tests that need bitcoind (they self-skip, but
+          # ensure the pure suite is green by pointing PBABENCH_BITCOIND at a
+          # missing path is NOT needed; the skip guard handles it).
+          python -m pytest tests/ -q -k "not propagation" -m "not integration" \
+            --ignore=tests/test_propagation_integration.py
+      - name: Safety tests explicitly
+        run: python -m pytest tests/test_safety.py -q
+
+  # Tiny integration smoke against a real bitcoind, run on demand (workflow_dispatch)
+  # or on tags. Building Bitcoin Core from the vendored source is slow, so we
+  # download a signed release binary. Not run on every push (heavy benchmarks are
+  # intentionally opt-in).
+  integration-smoke:
+    name: Integration smoke (real bitcoind, opt-in)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt pytest
+      - name: Download Bitcoin Core release binary
+        run: |
+          set -euo pipefail
+          V=31.1.0
+          URL="https://bitcoincore.org/bin/bitcoin-core-${V}/bitcoin-${V}-x86_64-linux-gnu.tar.gz"
+          curl -sSL "$URL" -o core.tar.gz
+          tar xzf core.tar.gz
+          BITCOIND="$PWD/bitcoin-${V}/bin/bitcoind"
+          "$BITCOIND" --version | head -1
+          echo "PBABENCH_BITCOIND=$BITCOIND" >> "$GITHUB_ENV"
+      - name: Run smoke benchmark
+        run: |
+          python ./pba_bench.py benchmark --bitcoind "$PBABENCH_BITCOIND" \
+            --profile smoke --outdir /tmp/ci-smoke
+      - name: Run tiny propagation smoke
+        run: |
+          python ./pba_bench.py propagate --bitcoind "$PBABENCH_BITCOIND" \
+            --num-utxos 30 --sigops-per-input 10 --observer-par 1 --topology star \
+            --confirm --outdir /tmp/ci-prop

