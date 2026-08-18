@@ -150,6 +150,22 @@ so `K ≤ 101`.
 # cross-version matrix from a manifest
 ./pba_bench.py compare --manifest configs/core-builds.json
 
+# BIP54-active worst-case benchmark: activate BIP54 on a disposable regtest node,
+# build the split (multi-transaction) poison, measure single-threaded validation
+./pba_bench.py benchmark --bitcoind /opt/core-bip54/bin/bitcoind \
+    --profile custom --num-utxos 8000 --sigops-per-input 100 \
+    --per-tx-inputs 25 --bip54-active --activate-bip54 --par 1 --confirm
+
+# CHECKMULTISIG-poison variant (packs ~200 sigops/input, the worst found)
+./pba_bench.py benchmark --bitcoind /opt/core-bip54/bin/bitcoind \
+    --profile custom --num-utxos 8000 --sigops-per-input 200 \
+    --spk-kind multisig --per-tx-inputs 12 --bip54-active --activate-bip54 --par 1 --confirm
+
+# bounded deterministic search for the post-BIP54 worst case (opt-in, heavy)
+./pba_bench.py search --bitcoind /opt/core-bip54/bin/bitcoind \
+    --spk-kind multisig --objective wall --budget 10 --par 1 --confirm \
+    --max-blocks 700
+
 # validate an externally-contributed result file
 ./pba_bench.py validate results/core-31/small-x3/results.json
 
@@ -237,6 +253,29 @@ SHA-256, `--version`, RPC subversion, git commit when available).
 
 The same construction runs against every binary in the matrix. `configs/core-builds.json`
 is a template.
+
+---
+
+## Post-BIP54 worst-case research
+
+The `--bip54-active` / `--activate-bip54` flags, the `--spk-kind`/`--per-tx-inputs`
+construction knobs, and the `search` subcommand support measuring the *post-BIP54*
+worst case (see `research/POST_BIP54_WORST_CASE.md` and
+`research/BIP54_BOUNDARY_MAP.md`).
+
+Key results (measured on the BIP54 reference implementation, Bitcoin Core PR
+#35793 commit `9630491bf`, and vanilla v31.1.0, on a Xeon E5-2680):
+
+* The original single-transaction poison is **live-rejected** by BIP54 with
+  `bad-txns-legacy-sigops`.
+* A BIP54-*valid* "split" block (the poison spread across ~700 small
+  transactions, using 1-of-17 `OP_CHECKMULTISIG` to pack 20 sigops/opcode)
+  reaches ~104 s of single-threaded validation — comparable to the pre-BIP54
+  poison. BIP54 eliminates the `O(N²)` sighash-serialization bottleneck (~31×)
+  but not the total per-block ECDSA work, because the per-block sigop cap does
+  not count spent-scriptPubKey sigops and BIP54's cap is per-transaction.
+
+Safety is unchanged: everything stays regtest-only, loopback-only, disposable.
 
 ---
 

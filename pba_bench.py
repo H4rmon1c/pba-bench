@@ -42,6 +42,11 @@ def _add_common(p):
                    help="extra bitcoind argument, e.g. --extra-arg -debug=1 (safety-filtered)")
     p.add_argument("--par", type=int, default=0, metavar="THREADS",
                    help="script validation threads (-par); 0 = node default")
+    p.add_argument("--bip54-active", action="store_true",
+                   help="pass -vbparams to activate BIP54 (consensuscleanup) on regtest")
+    p.add_argument("--activate-bip54", action="store_true",
+                   help="also mine through the BIP9 cycle so BIP54 is ACTIVE before "
+                        "the measured block (requires --bip54-active; adds ~430 prep blocks)")
     p.add_argument("--warm-cold", choices=["cold", "warm"], default="cold",
                    help="run against a freshly-started node (cold) or after warmup (warm)")
     p.add_argument("--cpu-affinity", default=None, metavar="CPUS",
@@ -81,6 +86,8 @@ def cmd_benchmark(args) -> int:
         rpc_host=args.rpc_host,
         extra_args=args.extra_arg,
         cpu_affinity=args.cpu_affinity,
+        bip54=args.bip54_active,
+        activate_bip54=args.activate_bip54,
     )
     if args.max_wall_seconds is not None: cfg.max_wall_seconds = args.max_wall_seconds
     if args.max_rss_mb is not None: cfg.max_peak_rss_mb = args.max_rss_mb
@@ -88,6 +95,8 @@ def cmd_benchmark(args) -> int:
     if args.max_poison_tx_bytes is not None: cfg.max_poison_tx_bytes = args.max_poison_tx_bytes
     if args.num_utxos is not None: cfg.num_utxos = args.num_utxos
     if args.sigops_per_input is not None: cfg.sigops_per_input = args.sigops_per_input
+    if args.per_tx_inputs is not None: cfg.per_tx_inputs = args.per_tx_inputs
+    if args.spk_kind: cfg.spk_kind = args.spk_kind
     if args.sweep_utxos: cfg.sweep_utxos = [int(x) for x in args.sweep_utxos.split(",")]
     if args.sweep_sigops: cfg.sweep_sigops = [int(x) for x in args.sweep_sigops.split(",")]
 
@@ -260,6 +269,37 @@ def cmd_compare(args) -> int:
     return 0
 
 
+def cmd_search(args) -> int:
+    from search import SearchConfig, run_search, search_terminal_summary
+    from safety import SafetyError
+
+    if not args.confirm:
+        print("ERROR: --profile search requires --confirm (it mines 100+ prep blocks "
+              "and a poison block against a real BIP54 node per candidate).", file=sys.stderr)
+        return 2
+    bitcoind = args.bitcoind or Path("/usr/local/bin/bitcoind")
+    if not bitcoind.is_file():
+        print(f"ERROR: bitcoind not found: {bitcoind}", file=sys.stderr)
+        return 2
+    cfg = SearchConfig(
+        bitcoind_path=bitcoind,
+        spk_kind=args.spk_kind,
+        objective=args.objective,
+        budget=args.budget,
+        seed=args.seed,
+        par=args.par,
+        outdir=args.outdir or _default_outdir("search"),
+        resume=args.resume,
+        cpu_affinity=args.cpu_affinity,
+    )
+    if args.max_wall_seconds is not None: cfg.max_wall_seconds = args.max_wall_seconds
+    if args.max_blocks is not None: cfg.max_blocks = args.max_blocks
+    result = run_search(cfg, print)
+    print(search_terminal_summary(result))
+    print(f"search results: {cfg.outdir / 'search.json'}")
+    return 0
+
+
 def cmd_report(args) -> int:
     from report import generate_report
     md = generate_report(args.json, args.output)
@@ -301,6 +341,11 @@ def main(argv=None) -> int:
                     help="acknowledge running a larger/custom benchmark case")
     pb.add_argument("--num-utxos", type=int, default=None, help="override N (poison inputs)")
     pb.add_argument("--sigops-per-input", type=int, default=None, help="override K (CHECKSIG/input)")
+    pb.add_argument("--spk-kind", choices=["checksig", "multisig"], default=None,
+                    help="scriptPubKey family: DUP/CHECKSIGVERIFY chain or 1-of-N CHECKMULTISIG")
+    pb.add_argument("--per-tx-inputs", type=int, default=None,
+                    help="split the poison across N-input transactions (BIP54-valid); "
+                         "each tx has per_tx_inputs*K sigops <= 2500")
     pb.add_argument("--vector", choices=["scriptpubkey"], default="scriptpubkey")
     pb.add_argument("--sweep-utxos", default=None, help="comma-separated N values (one run each)")
     pb.add_argument("--sweep-sigops", default=None, help="comma-separated K values (one run each)")
@@ -355,6 +400,23 @@ def main(argv=None) -> int:
     pv.add_argument("json", type=Path)
     pv.add_argument("--schema", default=None)
     pv.set_defaults(func=cmd_validate)
+
+    ps2 = sub.add_parser("search", help="bounded deterministic search for the post-BIP54 worst case")
+    ps2.add_argument("--bitcoind", type=Path, default=None)
+    ps2.add_argument("--spk-kind", choices=["checksig", "multisig"], default="checksig")
+    ps2.add_argument("--objective", choices=["wall", "cpu", "cpu-per-weight", "wall-per-weight"],
+                     default="wall")
+    ps2.add_argument("--budget", type=int, default=10)
+    ps2.add_argument("--seed", type=int, default=1)
+    ps2.add_argument("--par", type=int, default=1)
+    ps2.add_argument("--outdir", type=Path, default=None)
+    ps2.add_argument("--confirm", action="store_true")
+    ps2.add_argument("--resume", action="store_true",
+                     help="resume an interrupted search from its checkpoint")
+    ps2.add_argument("--max-wall-seconds", type=int, default=None)
+    ps2.add_argument("--max-blocks", type=int, default=None)
+    ps2.add_argument("--cpu-affinity", default=None)
+    ps2.set_defaults(func=cmd_search)
 
     args = p.parse_args(argv)
     return args.func(args)

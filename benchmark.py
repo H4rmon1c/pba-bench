@@ -95,10 +95,14 @@ class BenchmarkConfig:
     max_poison_tx_bytes: int = DEFAULT_LIMITS["max_poison_tx_bytes"]
     extra_args: list = field(default_factory=list)
     cpu_affinity: str | None = None   # e.g. "0" or "0,2"; None = inherit
+    bip54: bool = False               # pass -vbparams to activate BIP54 on regtest
+    activate_bip54: bool = False      # mine through the BIP9 cycle before construction
     # construction overrides
     num_utxos: int | None = None
     sigops_per_input: int | None = None
     vector: str = "scriptpubkey"
+    spk_kind: str = "checksig"        # "checksig" | "multisig"
+    per_tx_inputs: int = 0            # split poison block into N-input transactions
     sweep_utxos: list = field(default_factory=list)   # e.g. [100, 200, 400]
     sweep_sigops: list = field(default_factory=list)  # e.g. [1, 2, 4]
 
@@ -146,9 +150,13 @@ class Node:
         )
         self.safe_cfg.p2p_peers = validator.validate_p2p_peers(
             self.safe_cfg.p2p_peers, p2p_bind_host)
-        self.safe_cfg.extra_args = validator.validate_extra_args(
-            cfg.extra_args + ([f"-par={cfg.validation_threads}"] if cfg.validation_threads else [])
-        )
+        extra = list(cfg.extra_args)
+        if cfg.validation_threads:
+            extra.append(f"-par={cfg.validation_threads}")
+        if cfg.bip54:
+            from bip54 import VB_PARAMS
+            extra.append(f"-vbparams={VB_PARAMS}")
+        self.safe_cfg.extra_args = validator.validate_extra_args(extra)
         self._proc = None
         self.rpc = None
         self._rpc_probe = None
@@ -271,6 +279,11 @@ class RunResult(dict):
 
 def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
              cfg: BenchmarkConfig, log, command: str = "") -> RunResult:
+    if cfg.activate_bip54:
+        from bip54 import activate_bip54
+        log("activating BIP54 (consensuscleanup) on the disposable regtest node...")
+        activate_bip54(node.rpc, log)
+
     gen = PoisonBlockGenerator(node.rpc, gen_cfg, log)
 
     # Baseline: time submission of a normal (empty) block for comparison.
@@ -283,7 +296,10 @@ def _run_one(node: Node, gen_cfg: ConstructionConfig, run_id: str, profile: str,
     baseline_wall = _baseline_submit(node)
 
     log("building poison construction (prep)...")
-    res = gen.generate()
+    if cfg.per_tx_inputs and cfg.per_tx_inputs < gen_cfg.num_utxos:
+        res = gen.generate_split(cfg.per_tx_inputs)
+    else:
+        res = gen.generate()
 
     poison_tx = res.poison_tx
     poison_block = res.poison_block
@@ -501,17 +517,24 @@ def export_results(results: list, outdir: Path) -> tuple:
     return json_path, csv_path
 
 
-def required_blocks(gen_cfg: ConstructionConfig) -> int:
+def required_blocks(gen_cfg: ConstructionConfig, bip54_activate: bool = False) -> int:
     """Total blocks a construction mines, including the poison block.
 
     Used to enforce ``--max-blocks`` *before* constructing anything.
     """
     from construction import COINBASE_MATURITY, MAX_BLOCK_SIGOPS_COST
+    # Use the inaccurate (block-sigop-cap) count so multisig prep is sized right.
+    cost = 20 * ((gen_cfg.sigops_per_input + 15) // 16) if gen_cfg.spk_kind == "multisig" \
+        else gen_cfg.sigops_per_input
     sigops_per_prep_block = MAX_BLOCK_SIGOPS_COST // 4
     reserve = 400
-    max_utxos_per_prep_block = max(1, (sigops_per_prep_block - reserve) // gen_cfg.sigops_per_input)
+    max_utxos_per_prep_block = max(1, (sigops_per_prep_block - reserve) // cost)
     n_prep_blocks = (gen_cfg.num_utxos + max_utxos_per_prep_block - 1) // max_utxos_per_prep_block
-    return COINBASE_MATURITY + n_prep_blocks + 1
+    total = COINBASE_MATURITY + n_prep_blocks + 1
+    if bip54_activate:
+        from bip54 import activation_block_count
+        total += activation_block_count()
+    return total
 
 
 # --------------------------------------------------------------------------- #
@@ -539,7 +562,7 @@ def run_benchmark(cfg: BenchmarkConfig, workspace: Path, log=None,
     # Enforce --max-blocks before constructing anything: refuse any config that
     # would need more blocks than the limit.
     for g_idx, gen_cfg in enumerate(gen_configs):
-        need = required_blocks(gen_cfg)
+        need = required_blocks(gen_cfg, bip54_activate=cfg.activate_bip54)
         if need > cfg.max_blocks:
             raise SafetyError(
                 f"construction (N={gen_cfg.num_utxos}, K={gen_cfg.sigops_per_input}) "
@@ -597,19 +620,23 @@ def _build_gen_configs(cfg: BenchmarkConfig) -> list:
     base = profile_config(cfg.profile, {
         "num_utxos": cfg.num_utxos,
         "sigops_per_input": cfg.sigops_per_input,
+        "spk_kind": cfg.spk_kind,
     })
     configs = []
     if cfg.sweep_utxos:
         for n in cfg.sweep_utxos:
             configs.append(ConstructionConfig(seed=cfg.seed, num_utxos=n,
-                                              sigops_per_input=base.sigops_per_input))
+                                              sigops_per_input=base.sigops_per_input,
+                                              spk_kind=base.spk_kind))
     elif cfg.sweep_sigops:
         for k in cfg.sweep_sigops:
             configs.append(ConstructionConfig(seed=cfg.seed, num_utxos=base.num_utxos,
-                                              sigops_per_input=k))
+                                              sigops_per_input=k,
+                                              spk_kind=base.spk_kind))
     else:
         configs.append(ConstructionConfig(seed=cfg.seed, num_utxos=base.num_utxos,
-                                          sigops_per_input=base.sigops_per_input))
+                                          sigops_per_input=base.sigops_per_input,
+                                          spk_kind=base.spk_kind))
     return configs
 
 

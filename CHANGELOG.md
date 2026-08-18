@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.1.0 (unreleased) — post-BIP54 worst-case research
+
+Measures the *post-BIP54* worst case against the real BIP54 reference
+implementation (Bitcoin Core PR #35793, commit `9630491bf`). See
+`research/POST_BIP54_WORST_CASE.md` and `research/BIP54_BOUNDARY_MAP.md`.
+
+### New capabilities
+- `bip54.py` — activates the `consensuscleanup` deployment on a disposable
+  regtest node and builds BIP54-compliant coinbases; `--bip54-active` /
+  `--activate-bip54` flags on `benchmark`.
+- Split (multi-transaction) poison construction: `--per-tx-inputs N` spreads the
+  poison across N-input transactions so every transaction stays under BIP54's
+  2500-sigop per-tx limit.
+- `--spk-kind multisig` — a 1-of-17 `OP_CHECKMULTISIG` poison scriptPubKey that
+  packs 20 BIP54 sigops / up to 17 ECDSA verifies per opcode (the worst shape
+  found).
+- `search` subcommand — bounded, deterministic, resumable multi-objective search
+  (wall / CPU / CPU-per-weight / wall-per-weight) over the BIP54-valid space.
+
+### Findings (measured)
+- BIP54 live-rejects the original single-transaction poison.
+- A BIP54-valid multisig split reaches ~104 s single-threaded validation — the
+  total per-block ECDSA worst case is not reduced by BIP54 (the split was always
+  valid), though the `O(N²)` sighash-serialization bottleneck is (~31x).
+
 ## v2.0.0 (unreleased) — worst-case validation & propagation research harness
 
 The project evolved from a poison-block *reproduction* into a

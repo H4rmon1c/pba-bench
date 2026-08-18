@@ -56,9 +56,14 @@ from test_framework.messages import (
 )
 from test_framework.script import (
     CScript,
+    OP_0,
     OP_1,
+    OP_16,
+    OP_SWAP,
     OP_CHECKSIG,
     OP_CHECKSIGVERIFY,
+    OP_CHECKMULTISIG,
+    OP_CHECKMULTISIGVERIFY,
     OP_DUP,
     SIGHASH_ALL,
     LegacySignatureMsg,
@@ -87,6 +92,14 @@ MAX_SCRIPT_SIZE = 10000
 #: contributes 2K-1 non-push ops to the scriptPubKey, so K is capped at
 #: (MAX_OPS_PER_SCRIPT+1)/2.
 MAX_OPS_PER_SCRIPT = 201
+#: A deterministic junk public key used as the wrong pubkeys in the
+#: CHECKMULTISIG poison scriptPubKey. It is a fixed compressed pubkey distinct
+#: from the fund key. The valid pubkey is pushed *first* (so CHECKMULTISIG, which
+#: pops pubkeys in reverse, checks it *last*), forcing a full ECDSA verify against
+#: every pubkey.
+_MULTISIG_JUNK_PUBKEY = (
+    b"\x02" + bytes(range(32, 64))  # a fixed compressed pubkey, not the fund key
+)
 
 
 def script_pubkey_size(k: int) -> int:
@@ -149,7 +162,8 @@ class ConstructionConfig:
 
     seed: int = 1
     num_utxos: int = 10            # N: number of poison inputs / prep UTXOs
-    sigops_per_input: int = 2      # K: executed CHECKSIG ops per input's scriptPubKey
+    sigops_per_input: int = 2      # K: executed sigops per input's scriptPubKey
+    spk_kind: str = "checksig"     # "checksig" (DUP/CHECKSIGVERIFY) or "multisig"
     utxo_value_sats: int = 100_000
     change_script: str = "op_true"
     max_block_weight: int = MAX_BLOCK_WEIGHT
@@ -163,6 +177,25 @@ class ConstructionConfig:
             raise ValueError("num_utxos must be >= 1")
         if self.sigops_per_input < 1:
             raise ValueError("sigops_per_input must be >= 1")
+        if self.spk_kind == "checksig":
+            self._validate_checksig()
+        elif self.spk_kind == "multisig":
+            self._validate_multisig()
+        else:
+            raise SafetyError(
+                f"unknown spk_kind {self.spk_kind!r} (choose checksig|multisig)")
+        # Sanity cap: a single poison block can hold at most ~1 MB of signatures
+        # and each UTXO's scriptPubKey is bounded by the prep block sigop cap, so
+        # ~200M sigops is the theoretical ceiling for one block. Beyond that the
+        # request is certainly a mistake. The real guards are the block-size and
+        # per-block sigop caps plus --confirm and the --max-* limits.
+        if self.num_utxos * self.sigops_per_input > 200_000_000:
+            raise SafetyError(
+                f"requested {self.num_utxos * self.sigops_per_input} legacy sigops in one "
+                "transaction; refusing to build an unrealistically large case."
+            )
+
+    def _validate_checksig(self) -> None:
         if script_pubkey_size(self.sigops_per_input) > MAX_SCRIPT_SIZE:
             raise SafetyError(
                 f"sigops_per_input={self.sigops_per_input} makes the scriptPubKey "
@@ -180,6 +213,18 @@ class ConstructionConfig:
                 f"MAX_OPS_PER_SCRIPT ({MAX_OPS_PER_SCRIPT}) in the scriptPubKey; "
                 f"the block would be rejected. Maximum for this construction is "
                 f"{(MAX_OPS_PER_SCRIPT + 1) // 2}."
+            )
+
+    def _validate_multisig(self) -> None:
+        # The generator uses a 1-of-17 CHECKMULTISIG, which costs 1+17=18 ops per
+        # block (plus OP_DUP/OP_0/OP_SWAP reuse overhead) and adds nKeysCount to
+        # the 201-op budget, so at most 10 blocks = 200 BIP54 sigops per input.
+        segments = (self.sigops_per_input + 15) // 16
+        if segments > 10:
+            raise SafetyError(
+                f"sigops_per_input={self.sigops_per_input} makes the multisig "
+                f"scriptPubKey exceed the 201-op budget (each 1-of-17 CHECKMULTISIG "
+                f"costs 1+17=18 ops); maximum is 200 sigops for this construction."
             )
         # Sanity cap: a single poison block can hold at most ~1 MB of signatures
         # and each UTXO's scriptPubKey is bounded by the prep block sigop cap, so
@@ -210,6 +255,49 @@ def poison_script_pubkey(pubkey_bytes: bytes, k: int) -> CScript:
     for _ in range(k - 1):
         ops += [OP_DUP, pubkey_bytes, OP_CHECKSIGVERIFY]
     ops += [pubkey_bytes, OP_CHECKSIG]
+    return CScript(ops)
+
+
+def poison_script_pubkey_multisig(pubkey_bytes: bytes, n_segments: int,
+                                  junk_pubkeys: list | None = None,
+                                  n_keys: int = 16) -> CScript:
+    """Build a CHECKMULTISIG-based poison scriptPubKey with ``n_segments`` 1-of-N
+    ``OP_CHECKMULTISIG(VERIFY)`` blocks. Each block is preceded by a push of ``N``
+    (``n_keys``), so the BIP16 *accurate* sigop count is ``N`` each when ``N <= 16``
+    and ``MAX_PUBKEYS_PER_MULTISIG`` (20) when ``N > 16``. The valid pubkey is
+    placed last, so each 1-of-N CHECKMULTISIG must perform a full ECDSA verify
+    against all ``N`` pubkeys (the worst case) to find the matching signature.
+
+    Because ``OP_CHECKMULTISIG`` adds ``nKeysCount`` to ``MAX_OPS_PER_SCRIPT``
+    (interpreter.cpp), each block costs ``1 + N`` non-push ops plus the reuse
+    overhead, so ``n_segments`` is bounded by the 201-op budget rather than only
+    ``MAX_SCRIPT_SIZE``.
+
+    Each block is ``OP_DUP OP_0 OP_SWAP OP_1 <N-1 junk> <valid> <N> OP_CHECKMULTISIGVERIFY``
+    and the final block is ``OP_0 OP_SWAP OP_1 <N-1 junk> <valid> <N> OP_CHECKMULTISIG``.
+    The ``OP_DUP OP_0 OP_SWAP`` re-creates a fresh (zero dummy, sig) pair so one
+    signature satisfies every CHECKMULTISIG.
+    """
+    if junk_pubkeys is None:
+        junk_pubkeys = [_MULTISIG_JUNK_PUBKEY]
+    if n_segments < 1:
+        raise ValueError("multisig poison needs at least one CHECKMULTISIG")
+    junk = [junk_pubkeys[i % len(junk_pubkeys)] for i in range(n_keys - 1)]
+    n_push = OP_16 if n_keys == 16 else n_keys
+    # The valid pubkey must be pushed *first* so CHECKMULTISIG (which pops the
+    # pubkeys in reverse, i.e. the last-pushed one is checked first) tries it
+    # *last*, forcing a full ECDSA verify against all n_keys pubkeys.
+    pubkeys = [pubkey_bytes] + junk
+    ops: list = []
+    for i in range(n_segments):
+        if i < n_segments - 1:
+            ops += [OP_DUP, OP_0, OP_SWAP, OP_1]
+            ops += pubkeys + [n_push]
+            ops += [OP_CHECKMULTISIGVERIFY]
+        else:
+            ops += [OP_0, OP_SWAP, OP_1]
+            ops += pubkeys + [n_push]
+            ops += [OP_CHECKMULTISIG]
     return CScript(ops)
 
 
@@ -322,17 +410,97 @@ class PoisonBlockGenerator:
         self.fund_pub = self.fund_key.get_pubkey()
         self.pub_bytes = self.fund_pub.get_bytes()
         self.fund_script = key_to_p2pk_script(self.pub_bytes)
+        self._effective_sigops_per_input = cfg.sigops_per_input
         # One shared scriptPubKey for every poison UTXO (same public key).
-        self.poison_spk = poison_script_pubkey(self.pub_bytes, cfg.sigops_per_input)
+        self.poison_spk = self._build_poison_spk()
         # Populated by generate(); initialized so metrics are callable standalone.
         self.prep_transactions = []
         self.prep_blocks = []
+
+    def _block_sigop_cost_per_output(self) -> int:
+        """Inaccurate (block-sigop-cap) sigop count of one poison output.
+
+        Matches ``GetSigOpCount(fAccurate=false)``: every CHECKSIG counts 1 and
+        every CHECKMULTISIG counts ``MAX_PUBKEYS_PER_MULTISIG`` (20). This is what
+        the per-block sigop cap uses, and it is *larger* than the BIP54 (accurate)
+        count for multisig.
+        """
+        if self.cfg.spk_kind == "checksig":
+            return self.cfg.sigops_per_input
+        segments = (self.cfg.sigops_per_input + 15) // 16
+        return 20 * segments
+
+    def _build_poison_spk(self) -> CScript:
+        """Build the shared poison scriptPubKey for ``cfg.spk_kind``.
+
+        ``checksig`` uses the classic DUP/CHECKSIGVERIFY chain (K CHECKSIGs).
+        ``multisig`` uses 1-of-17 CHECKMULTISIG(VERIFY) blocks (20 BIP54 sigops and
+        up to 17 ECDSA verifies each), which packs more sigops per poison-input
+        byte. ``sigops_per_input`` is the target per-UTXO sigop count.
+        """
+        cfg = self.cfg
+        if cfg.spk_kind == "checksig":
+            return poison_script_pubkey(self.pub_bytes, cfg.sigops_per_input)
+        if cfg.spk_kind == "multisig":
+            # A 1-of-17 CHECKMULTISIG counts as 20 BIP54 sigops but performs 17
+            # ECDSA verifies per block (valid pubkey last) and costs 1+17=18 ops.
+            # With the OP_DUP/OP_0/OP_SWAP reuse pattern, 10 CHECKMULTISIG blocks
+            # fit the 201-op budget -> 200 BIP54 sigops / 170 ECDSA verifies per
+            # input. This is the maximum ECDSA work per poison input we found.
+            self._multisig_n_keys = 17
+            segments = self._multisig_segments(17)
+            junk = self._valid_junk_pubkeys(16)
+            spk = poison_script_pubkey_multisig(
+                self.pub_bytes, segments, junk, n_keys=self._multisig_n_keys)
+            # Actual sigop count of the built script (20 per CHECKMULTISIG here).
+            self._effective_sigops_per_input = spk.GetSigOpCount(True)
+            return spk
+        raise SafetyError(f"unknown spk_kind {cfg.spk_kind!r} (checksig|multisig)")
+
+    def _multisig_segments(self, n_keys: int) -> int:
+        """Max CHECKMULTISIG blocks fitting the 201-op budget for a given key count:
+        each VERIFY block costs 3+n_keys non-push ops, the final 2+n_keys."""
+        n = 0
+        while True:
+            ops = (n - 1) * (3 + n_keys) + (2 + n_keys) if n > 0 else 0
+            if n > 0 and ops > MAX_OPS_PER_SCRIPT:
+                return n - 1
+            n += 1
+            if n > 100:
+                return 0
+
+    def _valid_junk_pubkeys(self, count: int) -> list:
+        """Return ``count`` valid secp256k1 pubkeys distinct from the fund key.
+        These are the "wrong" keys a 1-of-N CHECKMULTISIG must reject; they must
+        be on-curve so each rejection is a real ECDSA verify."""
+        keys = DeterministicKeys((self.cfg.seed + 100_000) ^ 0x5A5A5A5A)
+        out = []
+        seen = set()
+        while len(out) < count:
+            k = keys.make_key()
+            b = k.get_pubkey().get_bytes()
+            if b == self.pub_bytes or b in seen:
+                continue
+            seen.add(b)
+            out.append(b)
+        return out
 
     # -- helpers ----------------------------------------------------------- #
     def _init_clock(self):
         if self.cfg.deterministic_time:
             # Deterministic wall clock so identical seeds produce identical blocks.
+            # If the chain already has blocks with later timestamps (e.g. BIP54
+            # was activated first, which mined many blocks), start from a base
+            # that is after the tip's median-time-past so the new blocks are not
+            # rejected as "time-too-old". Determinism is preserved because a
+            # given starting chain state yields the same base.
             base = 1_700_000_000 + (self.cfg.seed % 1_000_000)
+            try:
+                tip = self.rpc.getbestblockhash()
+                mtp = self.rpc.getblockheader(tip)["mediantime"]
+                base = max(base, mtp + 1)
+            except Exception:
+                pass
             self.rpc.setmocktime(base + 100_000)
             self._clock = base
         else:
@@ -371,16 +539,30 @@ class PoisonBlockGenerator:
         return self.rpc.getblock(self.rpc.getblockhash(height), 1)["tx"][0]
 
     # -- main entry -------------------------------------------------------- #
-    def generate(self) -> ConstructionResult:
+    def _mine_prep(self) -> int:
+        """Mine the baseline + prep blocks for all ``num_utxos`` poison UTXOs.
+
+        Returns the number of prep blocks mined (excluding the coinbase-maturity
+        baseline). Populates ``self.prep_blocks`` and ``self.prep_transactions``.
+        """
         cfg = self.cfg
-        N, K = cfg.num_utxos, cfg.sigops_per_input
-        self._init_clock()
+        N = cfg.num_utxos
+
+        # The per-block sigop cap counts sigops in the block's own transactions'
+        # scriptSigs and vout scriptPubKeys with the *inaccurate* count, where
+        # every CHECKMULTISIG counts as 20 (GetSigOpCount(fAccurate=false)),
+        # regardless of the OP_1..OP_16 prefix. So a multisig poison output
+        # contributes 20 * segments to the prep block's sigop cost, even though
+        # BIP54 counts only 16 * segments. The prep capacity must be sized by the
+        # block-sigop-cost (inaccurate) count, not the BIP54 (accurate) count.
+        block_cost_per_output = self._block_sigop_cost_per_output()
 
         sigops_per_prep_block = MAX_BLOCK_SIGOPS_COST // 4  # 20,000 legacy
         # Reserve headroom for the block's own coinbase (a P2PK output = 1 sigop)
         # and a safety margin, so the prep block stays under the per-block cap.
         reserve = 400
-        max_utxos_per_prep_block = max(1, (sigops_per_prep_block - reserve) // K)
+        max_utxos_per_prep_block = max(
+            1, (sigops_per_prep_block - reserve) // block_cost_per_output)
         n_prep_blocks = (N + max_utxos_per_prep_block - 1) // max_utxos_per_prep_block
 
         if cfg.max_prep_blocks and n_prep_blocks > cfg.max_prep_blocks:
@@ -423,6 +605,29 @@ class PoisonBlockGenerator:
 
         self.prep_blocks = prep_blocks
         self.prep_transactions = prep_txs
+        return n_prep_blocks
+
+    def _poison_outpoints(self) -> list:
+        outpoints = []
+        for block in self.prep_blocks:
+            for tx in block.vtx[1:]:
+                for vout in range(len(tx.vout)):
+                    outpoints.append((tx, vout))
+        assert len(outpoints) == self.cfg.num_utxos
+        return outpoints
+
+    def _sign_poison_inputs(self, tx: CTransaction, script_code) -> None:
+        """Sign every input of ``tx`` with the shared fund key (legacy SIGHASH_ALL)."""
+        N = len(tx.vin)
+        preimages, _ = build_legacy_preimages(tx, [script_code] * N)
+        for i in range(N):
+            sighash = hash256(preimages[i])
+            sig = sign_der(self.fund_secret, sighash) + bytes([SIGHASH_ALL])
+            tx.vin[i].scriptSig = CScript([sig])
+
+    def generate(self) -> ConstructionResult:
+        self._init_clock()
+        n_prep = self._mine_prep()
 
         poison_tx = self._build_poison_tx()
         height = self.rpc.getblockcount() + 1
@@ -430,9 +635,47 @@ class PoisonBlockGenerator:
                                     coinbase=create_coinbase(height, pubkey=self.pub_bytes),
                                     txlist=[poison_tx])
         poison_block.solve()
-        return ConstructionResult(prep_blocks=prep_blocks, prep_transactions=prep_txs,
+        return ConstructionResult(prep_blocks=self.prep_blocks,
+                                  prep_transactions=self.prep_transactions,
                                   poison_tx=poison_tx, poison_block=poison_block,
-                                  metrics=self._metrics(poison_tx, n_prep_blocks))
+                                  metrics=self._metrics(poison_tx, n_prep))
+
+    def generate_split(self, per_tx_inputs: int) -> ConstructionResult:
+        """Build the *split* (BIP54-valid) poison block: the same ``num_utxos``
+        poison UTXOs are spent across several transactions, each with at most
+        ``per_tx_inputs`` inputs. If ``per_tx_inputs * K <= 2500`` every
+        transaction stays under the BIP54 per-transaction legacy-sigop limit, so
+        the whole block is BIP54-valid while still executing ``num_utxos * K``
+        CHECKSIGs.
+
+        This is the post-BIP54 worst-case shape: BIP54 forbids concentrating all
+        sigops in one transaction, but does not cap the *total* per-block sigops.
+        """
+        self._init_clock()
+        n_prep = self._mine_prep()
+        outpoints = self._poison_outpoints()
+
+        poison_txs = []
+        for t in range(0, len(outpoints), per_tx_inputs):
+            chunk = outpoints[t:t + per_tx_inputs]
+            tx = CTransaction()
+            for ptx, vout in chunk:
+                tx.vin.append(CTxIn(COutPoint(ptx.txid_int, vout)))
+            tx.vout.append(CTxOut(len(chunk) * self.cfg.utxo_value_sats,
+                                  _change_script(self.cfg.change_script, self.fund_pub)))
+            self._sign_poison_inputs(tx, self.poison_spk)
+            poison_txs.append(tx)
+
+        height = self.rpc.getblockcount() + 1
+        poison_block = create_block(tmpl=self._tmpl(),
+                                    coinbase=create_coinbase(height, pubkey=self.pub_bytes),
+                                    txlist=poison_txs)
+        poison_block.solve()
+        return ConstructionResult(prep_blocks=self.prep_blocks,
+                                  prep_transactions=self.prep_transactions,
+                                  poison_tx=poison_txs[0],
+                                  poison_block=poison_block,
+                                  metrics=self._split_metrics(poison_txs, n_prep, per_tx_inputs))
 
     # -- poison tx --------------------------------------------------------- #
     def _build_poison_tx(self) -> CTransaction:
@@ -479,7 +722,7 @@ class PoisonBlockGenerator:
     #
     def _metrics(self, poison_tx: CTransaction, n_prep_blocks: int) -> dict:
         cfg = self.cfg
-        N, K = cfg.num_utxos, cfg.sigops_per_input
+        N, K = cfg.num_utxos, self._effective_sigops_per_input
         sizes = self._preimage_sizes or []
 
         total_sigops = N * K
@@ -520,6 +763,47 @@ class PoisonBlockGenerator:
             "theoretical_sighash_preimage_bytes_no_cache": no_cache_serialized,
         }
         return m
+
+    def _split_metrics(self, poison_txs: list, n_prep_blocks: int,
+                       per_tx_inputs: int) -> dict:
+        """Metrics for the split (BIP54-valid) poison block.
+
+        ``total_legacy_sigops_bip54`` is the *per-transaction* max, since BIP54
+        caps sigops per transaction. ``executed_checksig_count`` is the block
+        total. The per-tx sigop count must stay <= 2500 for BIP54 validity.
+        """
+        cfg = self.cfg
+        N, K = cfg.num_utxos, self._effective_sigops_per_input
+        per_tx_sigops = min(per_tx_inputs, N) * K
+        total_sigops = N * K
+        # Sighash serialization across the split block: each input of every tx
+        # serializes its own O(per_tx_inputs)-sized preimage once.
+        sighash_serialized = 0
+        for tx in poison_txs:
+            n_in = len(tx.vin)
+            per_in = (n_in * 40 + script_pubkey_size(K) + 100)
+            sighash_serialized += n_in * per_in
+        block_weight = sum(_weight(t) for t in poison_txs)
+        return {
+            "num_utxos": N,
+            "sigops_per_input": K,
+            "num_prep_blocks": n_prep_blocks,
+            "num_prep_transactions": len(self.prep_transactions),
+            "num_poison_txs": len(poison_txs),
+            "per_tx_inputs": per_tx_inputs,
+            "max_sigops_per_tx_bip54": per_tx_sigops,
+            "total_legacy_sigops_bip54": per_tx_sigops,
+            "executed_checksig_count": total_sigops,
+            "ecdsa_verify_count": total_sigops,
+            "poison_tx_vin_count": N,
+            "poison_tx_vout_count": len(poison_txs),
+            "poison_tx_size_bytes": sum(len(t.serialize_without_witness()) for t in poison_txs),
+            "poison_tx_weight": block_weight,
+            "sighash_serialization_bytes": sighash_serialized,
+            "sighash_double_sha256_bytes": 2 * sighash_serialized,
+            "per_input_preimage_bytes": round(sighash_serialized / N, 1) if N else 0,
+            "no_cache_sighash_serialization_bytes": sighash_serialized * K,
+        }
 
 
 def _weight(tx: CTransaction) -> int:
